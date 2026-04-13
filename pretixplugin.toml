@@ -1,0 +1,5 @@
+[plugin]
+package = "pretix-nocodb"
+modules = [ "pretix_nocodb" ]
+marketplace_name = "nocodb"
+
