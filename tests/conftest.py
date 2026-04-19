@@ -138,7 +138,7 @@ def testmode_env(testmode_event, testmode_order):
 
 @pytest.fixture
 def mock_nocodb_config():
-    return { }
+    return {}
 
 
 @pytest.fixture

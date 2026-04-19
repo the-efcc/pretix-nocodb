@@ -3,7 +3,6 @@ from __future__ import annotations
 from django.utils.translation import gettext_lazy as _
 
 from . import __version__
-from .plugin_settings import register_settings_defaults
 
 try:
     from pretix.base.plugins import PluginConfig
@@ -27,6 +26,8 @@ class PluginApp(PluginConfig):
         compatibility = "pretix>=2026.3.0"
 
     def ready(self) -> None:
+        from .plugin_settings import register_settings_defaults
+
         register_settings_defaults()
         from . import (
             signals,  # noqa: F401
