@@ -96,6 +96,7 @@ class FakeNocoDBClient:
             "column_name": column.get("column_name", column["title"]),
             "uidt": column["uidt"],
             "description": column.get("description"),
+            "colOptions": column.get("colOptions"),
         }
         existing = self.tables[table_id]["columns"]
         if any(c["column_name"] == created["column_name"] for c in existing):
@@ -398,6 +399,67 @@ def test_sync_removes_legacy_order_code_and_matches_tickets_by_fk(event, order):
     assert ticket_rows[0]["orders_id"] == order_row_id
     assert ticket_rows[0]["order_status"] == "pending"
     assert "order_code" not in ticket_rows[0]
+
+
+def test_sync_upgrades_country_question_to_single_select(event, order):
+    item = Item.objects.create(
+        event=event,
+        name="Regular ticket",
+        default_price=Decimal("10.00"),
+    )
+    question = Question.objects.create(
+        event=event,
+        question="Country",
+        type=Question.TYPE_COUNTRYCODE,
+        required=False,
+        identifier="COUNTRY",
+    )
+    question.items.add(item)
+
+    position = OrderPosition.objects.create(
+        order=order,
+        item=item,
+        price=Decimal("10.00"),
+        attendee_name_cached="Ada Lovelace",
+    )
+    QuestionAnswer.objects.create(orderposition=position, question=question, answer="DE")
+
+    client = FakeNocoDBClient()
+    base = client.create_base("pretix")
+    orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
+    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    client.create_link_column(
+        tickets_table["id"],
+        title=ORDER_LINK_FIELD,
+        child_id=tickets_table["id"],
+        parent_id=orders_table["id"],
+    )
+    client.create_column(
+        tickets_table["id"],
+        {
+            "title": "Country",
+            "column_name": "q_COUNTRY",
+            "uidt": "SingleLineText",
+            "description": "pretix question COUNTRY: Country",
+        },
+    )
+
+    service = NocoDBSyncService(event, client=client)
+    service.config.base_id = base["id"]
+    service.sync_order(order)
+
+    updated_tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    country_column = next(
+        column for column in updated_tickets_table["columns"] if column.get("column_name") == "q_COUNTRY"
+    )
+    assert country_column["uidt"] == "SingleSelect"
+    option_titles = [option["title"] for option in country_column["colOptions"]["options"]]
+    assert "Germany" in option_titles
+
+    ticket_row = client.records[updated_tickets_table["id"]][0]
+    assert ticket_row["Country"] == "Germany"
 
 
 def test_sync_handles_create_column_responses_without_column_name(event, order):

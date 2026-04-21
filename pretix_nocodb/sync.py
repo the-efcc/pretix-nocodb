@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 from django.db.models import Max
+from django_countries import countries
 from django.utils.timezone import is_naive, make_naive
 from i18nfield.strings import LazyI18nString
 from pretix.base.models import Order, OrderPayment, Question, QuestionAnswer
@@ -19,6 +20,7 @@ TABLE_TICKETS = "tickets"
 ORDER_KEY_FIELD = "pretix_order_code"
 TICKET_KEY_FIELD = "pretix_position_id"
 ORDER_LINK_FIELD = "Order"
+SELECT_OPTION_COLOR = "#1f3a5f"
 
 
 def _column(
@@ -247,12 +249,7 @@ class NocoDBSyncService:
         title: str,
     ) -> dict[str, Any]:
         client = self._get_client()
-        payload = _column(
-            title,
-            self._question_uidt(question),
-            column_name=self._question_column_name(question.identifier),
-            description=self._question_description(question),
-        )
+        payload = self._question_column_payload(question, title=title)
         with suppress(NocoDBAPIError):
             client.create_column(table_id, payload)
 
@@ -270,11 +267,18 @@ class NocoDBSyncService:
         title: str,
     ) -> dict[str, Any]:
         client = self._get_client()
+        desired = self._question_column_payload(question, title=title)
         client.update_column(
             column["id"],
             {
-                "title": title,
-                "description": self._question_description(question),
+                "title": desired["title"],
+                "description": desired["description"],
+                "uidt": desired["uidt"],
+                **(
+                    {"colOptions": desired["colOptions"]}
+                    if desired.get("colOptions") is not None
+                    else {}
+                ),
             },
         )
         refreshed = self._fetch_table_state(column["fk_model_id"])
@@ -289,10 +293,43 @@ class NocoDBSyncService:
         title: str,
         question: Question,
     ) -> bool:
+        desired = self._question_column_payload(question, title=title)
         return (
-            column.get("title") != title
-            or column.get("description") != self._question_description(question)
+            column.get("title") != desired["title"]
+            or column.get("description") != desired["description"]
+            or column.get("uidt") != desired["uidt"]
+            or self._column_option_titles(column) != self._column_option_titles(desired)
         )
+
+    def _question_column_payload(self, question: Question, *, title: str) -> dict[str, Any]:
+        payload = _column(
+            title,
+            self._question_uidt(question),
+            column_name=self._question_column_name(question.identifier),
+            description=self._question_description(question),
+        )
+        options = self._question_select_options(question)
+        if options is not None:
+            payload["colOptions"] = {"options": options}
+        return payload
+
+    def _question_select_options(self, question: Question) -> list[dict[str, str]] | None:
+        question_obj = cast(Any, question)
+        if question_obj.type != Question.TYPE_COUNTRYCODE:
+            return None
+
+        country_names = sorted(str(name) for _, name in countries)
+        return [
+            {"title": country_name, "color": SELECT_OPTION_COLOR}
+            for country_name in country_names
+        ]
+
+    def _column_option_titles(self, column: dict[str, Any]) -> list[str]:
+        return [
+            str(option.get("title"))
+            for option in column.get("colOptions", {}).get("options", [])
+            if option.get("title")
+        ]
 
     def _ensure_order_link_column(
         self,
@@ -560,6 +597,8 @@ class NocoDBSyncService:
             return "Time"
         if question_obj.type == Question.TYPE_DATETIME:
             return "DateTime"
+        if question_obj.type == Question.TYPE_COUNTRYCODE:
+            return "SingleSelect"
         if question_obj.type == Question.TYPE_PHONENUMBER:
             return "PhoneNumber"
         return "SingleLineText"
