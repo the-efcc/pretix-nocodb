@@ -65,7 +65,6 @@ ORDERS_COLUMNS = [
 
 TICKETS_COLUMNS = [
     _column(TICKET_KEY_FIELD, "Number", pv=True, rqd=True),
-    _column("order_code", "SingleLineText"),
     _column("order_status", "SingleLineText"),
     _column("positionid", "Number"),
     _column("pretix_item_id", "Number"),
@@ -130,6 +129,7 @@ class NocoDBSyncService:
             orders_table,
             tickets_table,
         )
+        tickets_table = self._delete_ticket_column(tickets_table, "order_code")
 
         questions = list(
             self.event.questions.prefetch_related("items", "options").order_by("position", "pk")
@@ -332,6 +332,15 @@ class NocoDBSyncService:
         fk_column = tickets_table.columns_by_id[fk_column_id]
         return column["id"], fk_column["column_name"], tickets_table
 
+    def _delete_ticket_column(self, tickets_table: TableState, column_name: str) -> TableState:
+        column = tickets_table.columns_by_name.get(column_name)
+        if column is None:
+            return tickets_table
+
+        client = self._get_client()
+        client.delete_column(column["id"])
+        return self._fetch_table_state(tickets_table.id)
+
     def _upsert_table_state_column(self, table_state: TableState, column: dict[str, Any]) -> None:
         if column.get("id"):
             table_state.columns_by_id[column["id"]] = column
@@ -369,7 +378,7 @@ class NocoDBSyncService:
         order_obj = cast(Any, order)
         existing_rows = client.list_records(
             schema.tickets_table_id,
-            where=self._where_equals("order_code", order_obj.code),
+            where=self._where_equals(schema.order_fk_column_name, order_row_id),
             fields=["Id", TICKET_KEY_FIELD],
             limit=1000,
         )
@@ -477,7 +486,6 @@ class NocoDBSyncService:
         return {
             TICKET_KEY_FIELD: position_obj.pk,
             schema.order_fk_column_name: order_row_id,
-            "order_code": str(order_obj.code),
             "order_status": self._status_label(order_obj.status),
             "positionid": position_obj.positionid,
             "pretix_item_id": position_obj.item_id,

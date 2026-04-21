@@ -6,7 +6,15 @@ from decimal import Decimal
 import pytest
 from pretix.base.models import Item, OrderPosition, Question, QuestionAnswer, QuestionOption
 
-from pretix_nocodb.sync import ORDER_LINK_FIELD, TABLE_ORDERS, TABLE_TICKETS, NocoDBSyncService
+from pretix_nocodb.sync import (
+    ORDER_KEY_FIELD,
+    ORDER_LINK_FIELD,
+    ORDERS_COLUMNS,
+    TABLE_ORDERS,
+    TABLE_TICKETS,
+    TICKETS_COLUMNS,
+    NocoDBSyncService,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -146,6 +154,21 @@ class FakeNocoDBClient:
                 if column["id"] == column_id:
                     column.update(payload)
                     return table
+        raise KeyError(column_id)
+
+    def delete_column(self, column_id: str):
+        for table in self.tables.values():
+            for index, column in enumerate(table["columns"]):
+                if column["id"] != column_id:
+                    continue
+                removed = table["columns"].pop(index)
+                removed_keys = {
+                    key for key in (removed.get("title"), removed.get("column_name")) if key
+                }
+                for record in self.records[table["id"]]:
+                    for key in removed_keys:
+                        record.pop(key, None)
+                return True
         raise KeyError(column_id)
 
     def list_records(
@@ -313,6 +336,68 @@ def test_sync_updates_existing_question_column_title(event):
         column for column in tickets_table["columns"] if column.get("column_name") == "q_NICK"
     )
     assert question_column["title"] == "Display name"
+
+
+def test_sync_removes_legacy_order_code_and_matches_tickets_by_fk(event, order):
+    item = Item.objects.create(
+        event=event,
+        name="Regular ticket",
+        default_price=Decimal("10.00"),
+    )
+    position = OrderPosition.objects.create(
+        order=order,
+        item=item,
+        price=Decimal("10.00"),
+        attendee_name_cached="Existing attendee",
+    )
+
+    client = FakeNocoDBClient()
+    base = client.create_base("pretix")
+    orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
+    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    legacy_order_code = {
+        "title": "order_code",
+        "column_name": "order_code",
+        "uidt": "SingleLineText",
+    }
+    client.create_column(tickets_table["id"], legacy_order_code)
+    client.create_link_column(
+        tickets_table["id"],
+        title=ORDER_LINK_FIELD,
+        child_id=tickets_table["id"],
+        parent_id=orders_table["id"],
+    )
+    order_row_id = client.create_records(
+        orders_table["id"],
+        [{ORDER_KEY_FIELD: str(order.code)}],
+    )[0]["Id"]
+    client.create_records(
+        tickets_table["id"],
+        [
+            {
+                "pretix_position_id": position.pk,
+                "orders_id": order_row_id,
+                "order_code": "WRONG-CODE",
+            }
+        ],
+    )
+
+    service = NocoDBSyncService(event, client=client)
+    service.config.base_id = base["id"]
+    service.sync_order(order)
+
+    updated_tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    assert all(
+        column.get("column_name") != "order_code" for column in updated_tickets_table["columns"]
+    )
+
+    ticket_rows = client.records[updated_tickets_table["id"]]
+    assert len(ticket_rows) == 1
+    assert ticket_rows[0]["orders_id"] == order_row_id
+    assert ticket_rows[0]["order_status"] == "pending"
+    assert "order_code" not in ticket_rows[0]
 
 
 def test_sync_handles_create_column_responses_without_column_name(event, order):
