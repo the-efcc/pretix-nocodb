@@ -6,8 +6,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 from django.db.models import Max
-from django_countries import countries
 from django.utils.timezone import is_naive, make_naive
+from django_countries import countries
 from i18nfield.strings import LazyI18nString
 from pretix.base.models import Order, OrderPayment, Question, QuestionAnswer
 
@@ -315,14 +315,27 @@ class NocoDBSyncService:
 
     def _question_select_options(self, question: Question) -> list[dict[str, str]] | None:
         question_obj = cast(Any, question)
-        if question_obj.type != Question.TYPE_COUNTRYCODE:
-            return None
+        if question_obj.type == Question.TYPE_COUNTRYCODE:
+            country_names = sorted(str(name) for _, name in countries)
+            return [
+                {"title": country_name, "color": SELECT_OPTION_COLOR}
+                for country_name in country_names
+            ]
+        if question_obj.type in (Question.TYPE_CHOICE, Question.TYPE_CHOICE_MULTIPLE):
+            seen: set[str] = set()
+            options: list[dict[str, str]] = []
+            for option in question_obj.options.all():
+                title = self._option_label(option)
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                options.append({"title": title, "color": SELECT_OPTION_COLOR})
+            return options
+        return None
 
-        country_names = sorted(str(name) for _, name in countries)
-        return [
-            {"title": country_name, "color": SELECT_OPTION_COLOR}
-            for country_name in country_names
-        ]
+    def _option_label(self, option: Any) -> str:
+        # Comma is the MultiSelect separator in NocoDB; replace to avoid splitting the option.
+        return self._i18n_to_str(option.answer).strip().replace(",", " ")
 
     def _column_option_titles(self, column: dict[str, Any]) -> list[str]:
         return [
@@ -566,6 +579,14 @@ class NocoDBSyncService:
             return answer_obj.file_name if answer_obj.file else answer_obj.answer
         if question_type in (Question.TYPE_DATE, Question.TYPE_TIME, Question.TYPE_DATETIME):
             return answer_obj.answer or None
+        if question_type in (Question.TYPE_CHOICE, Question.TYPE_CHOICE_MULTIPLE):
+            labels = [self._option_label(option) for option in answer_obj.options.all()]
+            labels = [label for label in labels if label]
+            if not labels:
+                return None
+            if question_type == Question.TYPE_CHOICE:
+                return labels[0]
+            return ",".join(labels)
         return answer_obj.to_string(use_cached=True) or None
 
     def _answer_json(self, answer: QuestionAnswer) -> dict[str, Any]:
@@ -599,6 +620,10 @@ class NocoDBSyncService:
             return "DateTime"
         if question_obj.type == Question.TYPE_COUNTRYCODE:
             return "SingleSelect"
+        if question_obj.type == Question.TYPE_CHOICE:
+            return "SingleSelect"
+        if question_obj.type == Question.TYPE_CHOICE_MULTIPLE:
+            return "MultiSelect"
         if question_obj.type == Question.TYPE_PHONENUMBER:
             return "PhoneNumber"
         return "SingleLineText"

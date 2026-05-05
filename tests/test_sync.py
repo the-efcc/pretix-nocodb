@@ -462,6 +462,99 @@ def test_sync_upgrades_country_question_to_single_select(event, order):
     assert ticket_row["Country"] == "Germany"
 
 
+def test_sync_choice_question_becomes_single_select(event, order):
+    item = Item.objects.create(
+        event=event,
+        name="Workshop ticket",
+        default_price=Decimal("10.00"),
+    )
+    question = Question.objects.create(
+        event=event,
+        question="T-Shirt size",
+        type=Question.TYPE_CHOICE,
+        required=False,
+        identifier="TSHIRT",
+    )
+    option_s = QuestionOption.objects.create(question=question, identifier="SZ_S", answer="S")
+    QuestionOption.objects.create(question=question, identifier="SZ_M", answer="M")
+    question.items.add(item)
+
+    position = OrderPosition.objects.create(
+        order=order,
+        item=item,
+        price=Decimal("10.00"),
+        attendee_name_cached="Ada Lovelace",
+    )
+    answer = QuestionAnswer.objects.create(orderposition=position, question=question, answer="S")
+    answer.options.add(option_s)
+
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+
+    service.sync_order(order)
+
+    tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    column = next(
+        col for col in tickets_table["columns"] if col.get("column_name") == "q_TSHIRT"
+    )
+    assert column["uidt"] == "SingleSelect"
+    option_titles = [option["title"] for option in column["colOptions"]["options"]]
+    assert option_titles == ["S", "M"]
+
+    ticket_row = client.records[tickets_table["id"]][0]
+    assert ticket_row["T-Shirt size"] == "S"
+
+
+def test_sync_choice_multiple_question_becomes_multi_select(event, order):
+    item = Item.objects.create(
+        event=event,
+        name="Workshop ticket",
+        default_price=Decimal("10.00"),
+    )
+    question = Question.objects.create(
+        event=event,
+        question="Preferred tracks",
+        type=Question.TYPE_CHOICE_MULTIPLE,
+        required=False,
+        identifier="TRACKS",
+    )
+    option_a = QuestionOption.objects.create(question=question, identifier="TR_A", answer="Alpha")
+    option_b = QuestionOption.objects.create(question=question, identifier="TR_B", answer="Beta")
+    QuestionOption.objects.create(question=question, identifier="TR_C", answer="Gamma")
+    question.items.add(item)
+
+    position = OrderPosition.objects.create(
+        order=order,
+        item=item,
+        price=Decimal("10.00"),
+        attendee_name_cached="Ada Lovelace",
+    )
+    answer = QuestionAnswer.objects.create(
+        orderposition=position, question=question, answer="Alpha, Beta"
+    )
+    answer.options.add(option_a, option_b)
+
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+
+    service.sync_order(order)
+
+    tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    column = next(
+        col for col in tickets_table["columns"] if col.get("column_name") == "q_TRACKS"
+    )
+    assert column["uidt"] == "MultiSelect"
+    option_titles = [option["title"] for option in column["colOptions"]["options"]]
+    assert option_titles == ["Alpha", "Beta", "Gamma"]
+
+    ticket_row = client.records[tickets_table["id"]][0]
+    assert ticket_row["Preferred tracks"] == "Alpha,Beta"
+
+
 def test_sync_handles_create_column_responses_without_column_name(event, order):
     item = Item.objects.create(
         event=event,
