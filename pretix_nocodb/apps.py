@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from django.utils.translation import gettext_lazy as _
 
 from . import __version__
@@ -24,6 +26,9 @@ class PluginApp(PluginConfig):
         version = __version__
         category = "INTEGRATION"
         compatibility = "pretix>=2026.3.0"
+        settings_links: ClassVar = [
+            ((_("Settings"), _("NocoDB")), "plugins:pretix_nocodb:settings", {}),
+        ]
 
     def ready(self) -> None:
         from .plugin_settings import register_settings_defaults

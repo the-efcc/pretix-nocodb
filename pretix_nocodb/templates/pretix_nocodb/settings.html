@@ -1,0 +1,27 @@
+{% extends "pretixcontrol/event/settings_base.html" %}
+{% load i18n %}
+{% load bootstrap3 %}
+{% block inside %}
+    <h1>{% trans "NocoDB sync" %}</h1>
+    <p>
+        {% blocktrans trimmed %}
+            Configure the NocoDB instance to sync this event's orders, tickets and answers to.
+            Tables are created automatically the first time a sync runs.
+        {% endblocktrans %}
+    </p>
+    <form action="" method="post" class="form-horizontal">
+        {% csrf_token %}
+        {% bootstrap_form_errors form %}
+        {% bootstrap_field form.plugin_nocodb_enabled layout="horizontal" %}
+        {% bootstrap_field form.plugin_nocodb_api_url layout="horizontal" %}
+        {% bootstrap_field form.plugin_nocodb_api_token layout="horizontal" %}
+        {% bootstrap_field form.plugin_nocodb_workspace_id layout="horizontal" %}
+        {% bootstrap_field form.plugin_nocodb_base_id layout="horizontal" %}
+        {% bootstrap_field form.plugin_nocodb_base_title layout="horizontal" %}
+        <div class="form-group submit-group">
+            <button type="submit" class="btn btn-primary btn-save">
+                {% trans "Save" %}
+            </button>
+        </div>
+    </form>
+{% endblock %}

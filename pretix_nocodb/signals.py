@@ -5,6 +5,8 @@ from typing import Any, cast
 from django.db import transaction
 from django.db.models.signals import m2m_changed, post_delete, post_save
 from django.dispatch import receiver
+from django.urls import resolve, reverse
+from django.utils.translation import gettext_lazy as _
 from pretix.base.models import Question, QuestionOption
 from pretix.base.signals import (
     order_approved,
@@ -18,6 +20,7 @@ from pretix.base.signals import (
     order_placed,
     order_reactivated,
 )
+from pretix.control.signals import nav_event_settings
 
 from .plugin_settings import NocoDBConfig
 from .tasks import sync_event_schema, sync_order_to_nocodb
@@ -76,3 +79,25 @@ def sync_schema_on_question_option_change(sender, instance: QuestionOption, **kw
 def sync_schema_on_question_items_change(sender, instance: Question, action: str, **kwargs) -> None:
     if action in {"post_add", "post_remove", "post_clear"}:
         _enqueue_schema_sync(instance.event)
+
+
+@receiver(nav_event_settings, dispatch_uid="nocodb_nav_event_settings")
+def add_event_settings_nav(sender, request, **kwargs):
+    if not request.user.has_event_permission(
+        request.organizer, request.event, "event.settings.general:write", request=request
+    ):
+        return []
+    url = resolve(request.path_info)
+    return [
+        {
+            "label": _("NocoDB"),
+            "url": reverse(
+                "plugins:pretix_nocodb:settings",
+                kwargs={
+                    "event": request.event.slug,
+                    "organizer": request.organizer.slug,
+                },
+            ),
+            "active": url.namespace == "plugins:pretix_nocodb",
+        }
+    ]
