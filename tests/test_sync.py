@@ -758,6 +758,70 @@ def test_sync_upgrades_item_and_variation_columns_to_single_select(event, order)
     assert ticket_row["Variation name"] == "Early bird"
 
 
+def test_sync_extracts_attendee_name_parts(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(
+        order=order,
+        item=item,
+        price=Decimal("10"),
+        attendee_name_cached="Ada Lovelace",
+        attendee_name_parts={
+            "_scheme": "given_family",
+            "given_name": "Ada",
+            "family_name": "Lovelace",
+        },
+    )
+
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+    service.sync_order(order)
+
+    tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    column_names = {column["column_name"] for column in tickets_table["columns"]}
+    assert {"attendee_given_name", "attendee_family_name"} <= column_names
+
+    ticket_row = client.records[tickets_table["id"]][0]
+    assert ticket_row["attendee_given_name"] == "Ada"
+    assert ticket_row["attendee_family_name"] == "Lovelace"
+
+
+def test_sync_backfills_attendee_name_part_columns_on_legacy_table(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(
+        order=order,
+        item=item,
+        price=Decimal("10"),
+        attendee_name_cached="Ada Lovelace",
+        attendee_name_parts={"given_name": "Ada", "family_name": "Lovelace"},
+    )
+
+    client = FakeNocoDBClient()
+    base = client.create_base("pretix")
+    client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
+    legacy_columns = [
+        spec
+        for spec in TICKETS_COLUMNS
+        if spec["column_name"] not in {"attendee_given_name", "attendee_family_name"}
+    ]
+    client.create_table(base["id"], title=TABLE_TICKETS, columns=legacy_columns)
+
+    service = NocoDBSyncService(event, client=client)
+    service.config.base_id = base["id"]
+    service.sync_order(order)
+
+    updated_tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    column_names = {column["column_name"] for column in updated_tickets_table["columns"]}
+    assert {"attendee_given_name", "attendee_family_name"} <= column_names
+
+    ticket_row = client.records[updated_tickets_table["id"]][0]
+    assert ticket_row["attendee_given_name"] == "Ada"
+    assert ticket_row["attendee_family_name"] == "Lovelace"
+
+
 def test_sync_promotes_attendee_name_as_primary_value(event, order):
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
     OrderPosition.objects.create(

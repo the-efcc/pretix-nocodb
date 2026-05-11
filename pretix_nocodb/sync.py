@@ -75,6 +75,8 @@ TICKETS_COLUMNS = [
     _column("item_name", "SingleLineText"),
     _column("variation_name", "SingleLineText"),
     _column("attendee_name", "SingleLineText", pv=True),
+    _column("attendee_given_name", "SingleLineText"),
+    _column("attendee_family_name", "SingleLineText"),
     _column("attendee_email", "Email"),
     _column("seat", "SingleLineText"),
     _column("canceled", "Checkbox"),
@@ -135,6 +137,7 @@ class NocoDBSyncService:
             tickets_table,
         ) = self._ensure_order_link_column(orders_table, tickets_table)
         tickets_table = self._delete_ticket_column(tickets_table, "order_code")
+        tickets_table = self._ensure_static_columns(tickets_table, TICKETS_COLUMNS)
 
         questions = list(
             self.event.questions.prefetch_related("items", "options").order_by("position", "pk")
@@ -480,6 +483,23 @@ class NocoDBSyncService:
         )
         return self._fetch_table_state(table_state.id)
 
+    def _ensure_static_columns(
+        self,
+        table_state: TableState,
+        expected_columns: list[dict[str, Any]],
+    ) -> TableState:
+        client = self._get_client()
+        created_any = False
+        for spec in expected_columns:
+            column_name = spec.get("column_name") or spec.get("title")
+            if column_name in table_state.columns_by_name:
+                continue
+            client.create_column(table_state.id, spec)
+            created_any = True
+        if created_any:
+            return self._fetch_table_state(table_state.id)
+        return table_state
+
     def _ensure_primary_value(self, table_state: TableState, column_name: str) -> TableState:
         column = table_state.columns_by_name.get(column_name)
         if column is None or column.get("pv"):
@@ -647,6 +667,7 @@ class NocoDBSyncService:
         variation_name = (
             self._i18n_to_str(position_obj.variation.value) if position_obj.variation else None
         )
+        name_parts = position_obj.attendee_name_parts or {}
 
         return {
             TICKET_KEY_FIELD: position_obj.pk,
@@ -657,6 +678,8 @@ class NocoDBSyncService:
             "item_name": self._i18n_to_str(position_obj.item.name),
             "variation_name": variation_name,
             "attendee_name": position_obj.attendee_name_cached,
+            "attendee_given_name": name_parts.get("given_name") or None,
+            "attendee_family_name": name_parts.get("family_name") or None,
             "attendee_email": position_obj.attendee_email,
             "seat": str(position_obj.seat) if position_obj.seat else None,
             "canceled": position_obj.canceled,
