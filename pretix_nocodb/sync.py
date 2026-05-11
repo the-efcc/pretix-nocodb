@@ -183,6 +183,9 @@ class NocoDBSyncService:
 
         participants_table = self._ensure_primary_value(participants_table, "attendee_name")
 
+        self._ensure_view_title(orders_table.id, "all")
+        self._ensure_view_title(participants_table.id, "all")
+
         return SchemaState(
             orders_table_id=orders_table.id,
             participants_table_id=participants_table.id,
@@ -500,6 +503,12 @@ class NocoDBSyncService:
         if created_any:
             return self._fetch_table_state(table_state.id)
         return table_state
+
+    def _ensure_view_title(self, table_id: str, title: str) -> None:
+        client = self._get_client()
+        views = client.list_views(table_id)
+        if views and views[0].get("title") != title:
+            client.update_view(views[0]["id"], {"title": title})
 
     def _ensure_primary_value(self, table_state: TableState, column_name: str) -> TableState:
         column = table_state.columns_by_name.get(column_name)

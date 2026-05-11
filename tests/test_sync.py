@@ -33,11 +33,13 @@ class FakeNocoDBClient:
     def __init__(self):
         self.bases: list[dict] = []
         self.tables: dict[str, dict] = {}
+        self.views: dict[str, list[dict]] = {}
         self.records: dict[str, list[dict]] = {}
         self.links: dict[str, list[tuple[str, int, str, int]]] = {}
         self.base_counter = 1
         self.table_counter = 1
         self.column_counter = 1
+        self.view_counter = 1
         self.record_counter = 1
         self.junction_counter = 1
 
@@ -66,6 +68,9 @@ class FakeNocoDBClient:
         table = {"id": table_id, "base_id": base_id, "title": title, "columns": []}
         self.tables[table_id] = table
         self.records[table_id] = []
+        view_id = f"v_{self.view_counter}"
+        self.view_counter += 1
+        self.views[table_id] = [{"id": view_id, "title": title, "type": 0}]
         for column in columns:
             self.create_column(table_id, column)
         return table
@@ -251,6 +256,17 @@ class FakeNocoDBClient:
                         record.pop(key, None)
                 return True
         raise KeyError(column_id)
+
+    def list_views(self, table_id: str) -> list[dict]:
+        return list(self.views.get(table_id, []))
+
+    def update_view(self, view_id: str, payload: dict) -> dict:
+        for views in self.views.values():
+            for view in views:
+                if view["id"] == view_id:
+                    view.update(payload)
+                    return view
+        raise KeyError(view_id)
 
     def list_records(
         self,
@@ -1077,3 +1093,16 @@ def test_sync_uses_stable_tables(event):
         TABLE_ORDERS,
         TABLE_PARTICIPANTS,
     }
+
+
+def test_sync_renames_default_views_to_all(event):
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+
+    service.sync_schema()
+
+    for table_id, views in client.views.items():
+        assert views[0]["title"] == "All", (
+            f"default view of table {client.tables[table_id]['title']!r} should be 'All'"
+        )

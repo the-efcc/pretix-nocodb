@@ -173,6 +173,13 @@ class NocoDBClient:
             return response.get("list", [])
         return response or []
 
+    def list_views(self, table_id: str) -> list[dict[str, Any]]:
+        response = self._request("GET", f"/api/v2/meta/tables/{table_id}/views")
+        return response.get("list", [])
+
+    def update_view(self, view_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("PATCH", f"/api/v2/meta/views/{view_id}", json=payload)
+
     def update_column(self, column_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"/api/v2/meta/columns/{column_id}", json=payload)
 
