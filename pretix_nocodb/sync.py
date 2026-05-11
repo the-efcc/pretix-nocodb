@@ -22,6 +22,7 @@ ORDER_KEY_FIELD = "pretix_order_code"
 TICKET_KEY_FIELD = "pretix_position_id"
 ORDER_LINK_FIELD = "Order"
 SELECT_OPTION_COLOR = "#1f3a5f"
+STATUS_OPTIONS = ["pending", "paid", "expired", "canceled"]
 
 
 def _column(
@@ -168,6 +169,16 @@ class NocoDBSyncService:
         )
         tickets_table = self._ensure_select_column(
             tickets_table, "variation_name", "Variation name", variation_names,
+        )
+        tickets_table = self._ensure_select_column(
+            tickets_table, "order_status", "Order status", STATUS_OPTIONS,
+        )
+
+        orders_table = self._ensure_select_column(
+            orders_table, "status", "Status", STATUS_OPTIONS,
+        )
+        orders_table = self._ensure_select_column(
+            orders_table, "currency", "Currency", [str(self.event.currency)],
         )
 
         tickets_table = self._ensure_primary_value(tickets_table, "attendee_name")

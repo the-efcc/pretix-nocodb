@@ -18,6 +18,9 @@ from pretix_nocodb.sync import (
     ORDER_KEY_FIELD,
     ORDER_LINK_FIELD,
     ORDERS_COLUMNS,
+    PARTICIPANT_KEY_FIELD,
+    PARTICIPANTS_COLUMNS,
+    STATUS_OPTIONS,
     TABLE_ORDERS,
     TABLE_TICKETS,
     TICKET_KEY_FIELD,
@@ -522,7 +525,7 @@ def test_sync_removes_legacy_order_code_and_matches_tickets_by_link(event, order
 
     ticket_rows = client.records[updated_tickets_table["id"]]
     assert len(ticket_rows) == 1
-    assert ticket_rows[0]["order_status"] == "pending"
+    assert ticket_rows[0]["Order status"] == "pending"
     assert "order_code" not in ticket_rows[0]
 
 
@@ -827,6 +830,62 @@ def test_sync_backfills_attendee_name_part_columns_on_legacy_table(event, order)
     ticket_row = client.records[updated_tickets_table["id"]][0]
     assert ticket_row["attendee_given_name"] == "Ada"
     assert ticket_row["attendee_family_name"] == "Lovelace"
+
+
+def test_sync_upgrades_status_and_currency_to_single_select(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
+    )
+
+    client = FakeNocoDBClient()
+    base = client.create_base("pretix")
+    client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
+    client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+
+    service = NocoDBSyncService(event, client=client)
+    service.config.base_id = base["id"]
+    service.sync_order(order)
+
+    orders_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_ORDERS
+    )
+    tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+
+    status_column = next(
+        column for column in orders_table["columns"] if column.get("column_name") == "status"
+    )
+    assert status_column["uidt"] == "SingleSelect"
+    assert status_column["title"] == "Status"
+    assert [opt["title"] for opt in status_column["colOptions"]["options"]] == STATUS_OPTIONS
+
+    currency_column = next(
+        column for column in orders_table["columns"] if column.get("column_name") == "currency"
+    )
+    assert currency_column["uidt"] == "SingleSelect"
+    assert currency_column["title"] == "Currency"
+    assert [opt["title"] for opt in currency_column["colOptions"]["options"]] == [
+        str(event.currency),
+    ]
+
+    order_status_column = next(
+        column
+        for column in tickets_table["columns"]
+        if column.get("column_name") == "order_status"
+    )
+    assert order_status_column["uidt"] == "SingleSelect"
+    assert order_status_column["title"] == "Order status"
+    assert [opt["title"] for opt in order_status_column["colOptions"]["options"]] == (
+        STATUS_OPTIONS
+    )
+
+    order_row = client.records[orders_table["id"]][0]
+    assert order_row["Status"] == "pending"
+    assert order_row["Currency"] == str(event.currency)
+    ticket_row = client.records[tickets_table["id"]][0]
+    assert ticket_row["Order status"] == "pending"
 
 
 def test_sync_promotes_attendee_name_as_primary_value(event, order):
