@@ -9,6 +9,8 @@ from django.urls import resolve, reverse
 from django.utils.translation import gettext_lazy as _
 from pretix.base.models import Item, ItemVariation, Question, QuestionOption
 from pretix.base.signals import (
+    checkin_annulled,
+    checkin_created,
     order_approved,
     order_canceled,
     order_changed,
@@ -60,6 +62,12 @@ def _enqueue_order_sync(order) -> None:
 @receiver(order_denied, dispatch_uid="nocodb_order_denied")
 def sync_order_on_change(sender, order, **kwargs) -> None:
     _enqueue_order_sync(order)
+
+
+@receiver(checkin_created, dispatch_uid="nocodb_checkin_created")
+@receiver(checkin_annulled, dispatch_uid="nocodb_checkin_annulled")
+def sync_order_on_checkin(sender, checkin, **kwargs) -> None:
+    _enqueue_order_sync(checkin.position.order)
 
 
 @receiver(post_save, sender=Question, dispatch_uid="nocodb_question_saved")
