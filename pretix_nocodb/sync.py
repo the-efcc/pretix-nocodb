@@ -159,6 +159,14 @@ class NocoDBSyncService:
                 self._upsert_table_state_column(tickets_table, column)
             question_columns[question_identifier] = column["title"]
 
+        item_names, variation_names = self._collect_item_options()
+        tickets_table = self._ensure_select_column(
+            tickets_table, "item_name", "Item name", item_names,
+        )
+        tickets_table = self._ensure_select_column(
+            tickets_table, "variation_name", "Variation name", variation_names,
+        )
+
         return SchemaState(
             orders_table_id=orders_table.id,
             tickets_table_id=tickets_table.id,
@@ -418,6 +426,57 @@ class NocoDBSyncService:
             )
 
         return link_column["id"], reciprocal["id"], orders_table, tickets_table
+
+    def _collect_item_options(self) -> tuple[list[str], list[str]]:
+        items = list(
+            cast(Any, self.event).items.prefetch_related("variations").order_by("position", "pk")
+        )
+        item_names: list[str] = []
+        variation_names: list[str] = []
+        seen_items: set[str] = set()
+        seen_variations: set[str] = set()
+        for item in items:
+            name = self._i18n_to_str(item.name).strip()
+            if name and name not in seen_items:
+                seen_items.add(name)
+                item_names.append(name)
+            for variation in item.variations.all():
+                vname = self._i18n_to_str(variation.value).strip()
+                if vname and vname not in seen_variations:
+                    seen_variations.add(vname)
+                    variation_names.append(vname)
+        return item_names, variation_names
+
+    def _ensure_select_column(
+        self,
+        table_state: TableState,
+        column_name: str,
+        title: str,
+        options: list[str],
+    ) -> TableState:
+        column = table_state.columns_by_name.get(column_name)
+        if column is None:
+            return table_state
+        desired_options = [
+            {"title": option, "color": SELECT_OPTION_COLOR} for option in options
+        ]
+        if (
+            column.get("uidt") == "SingleSelect"
+            and column.get("title") == title
+            and self._column_option_titles(column) == options
+        ):
+            return table_state
+
+        client = self._get_client()
+        client.update_column(
+            column["id"],
+            {
+                "title": title,
+                "uidt": "SingleSelect",
+                "colOptions": {"options": desired_options},
+            },
+        )
+        return self._fetch_table_state(table_state.id)
 
     def _delete_ticket_column(self, tickets_table: TableState, column_name: str) -> TableState:
         column = tickets_table.columns_by_name.get(column_name)

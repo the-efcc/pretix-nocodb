@@ -4,7 +4,14 @@ import re
 from decimal import Decimal
 
 import pytest
-from pretix.base.models import Item, OrderPosition, Question, QuestionAnswer, QuestionOption
+from pretix.base.models import (
+    Item,
+    ItemVariation,
+    OrderPosition,
+    Question,
+    QuestionAnswer,
+    QuestionOption,
+)
 
 from pretix_nocodb.sync import (
     MAX_COLUMN_TITLE_LENGTH,
@@ -691,6 +698,51 @@ def test_sync_handles_create_column_responses_without_column_name(event, order):
 
     ticket_row = client.records[tickets_table["id"]][0]
     assert ticket_row["Company"] == "Acme"
+
+
+def test_sync_upgrades_item_and_variation_columns_to_single_select(event, order):
+    item = Item.objects.create(
+        event=event, name="Conference ticket", default_price=Decimal("13.37"),
+    )
+    variation = ItemVariation.objects.create(item=item, value="Early bird")
+    ItemVariation.objects.create(item=item, value="Regular")
+    OrderPosition.objects.create(
+        order=order,
+        item=item,
+        variation=variation,
+        price=Decimal("13.37"),
+    )
+
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+    service.sync_order(order)
+
+    tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    item_column = next(
+        column for column in tickets_table["columns"] if column.get("column_name") == "item_name"
+    )
+    variation_column = next(
+        column
+        for column in tickets_table["columns"]
+        if column.get("column_name") == "variation_name"
+    )
+    assert item_column["uidt"] == "SingleSelect"
+    assert item_column["title"] == "Item name"
+    assert [opt["title"] for opt in item_column["colOptions"]["options"]] == [
+        "Conference ticket",
+    ]
+    assert variation_column["uidt"] == "SingleSelect"
+    assert variation_column["title"] == "Variation name"
+    assert [opt["title"] for opt in variation_column["colOptions"]["options"]] == [
+        "Early bird",
+        "Regular",
+    ]
+
+    ticket_row = client.records[tickets_table["id"]][0]
+    assert ticket_row["Item name"] == "Conference ticket"
+    assert ticket_row["Variation name"] == "Early bird"
 
 
 def test_sync_uses_stable_tables(event):

@@ -7,7 +7,7 @@ from django.db.models.signals import m2m_changed, post_delete, post_save
 from django.dispatch import receiver
 from django.urls import resolve, reverse
 from django.utils.translation import gettext_lazy as _
-from pretix.base.models import Question, QuestionOption
+from pretix.base.models import Item, ItemVariation, Question, QuestionOption
 from pretix.base.signals import (
     order_approved,
     order_canceled,
@@ -79,6 +79,19 @@ def sync_schema_on_question_option_change(sender, instance: QuestionOption, **kw
 def sync_schema_on_question_items_change(sender, instance: Question, action: str, **kwargs) -> None:
     if action in {"post_add", "post_remove", "post_clear"}:
         _enqueue_schema_sync(instance.event)
+
+
+@receiver(post_save, sender=Item, dispatch_uid="nocodb_item_saved")
+@receiver(post_delete, sender=Item, dispatch_uid="nocodb_item_deleted")
+def sync_schema_on_item_change(sender, instance: Item, **kwargs) -> None:
+    _enqueue_schema_sync(instance.event)
+
+
+@receiver(post_save, sender=ItemVariation, dispatch_uid="nocodb_item_variation_saved")
+@receiver(post_delete, sender=ItemVariation, dispatch_uid="nocodb_item_variation_deleted")
+def sync_schema_on_item_variation_change(sender, instance: ItemVariation, **kwargs) -> None:
+    item = cast(Any, instance.item)
+    _enqueue_schema_sync(item.event)
 
 
 @receiver(nav_event_settings, dispatch_uid="nocodb_nav_event_settings")
