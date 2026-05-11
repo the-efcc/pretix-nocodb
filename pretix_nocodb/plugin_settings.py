@@ -12,7 +12,6 @@ _DEFAULTS = {
     "plugin_nocodb_api_token": ("", str),
     "plugin_nocodb_workspace_id": ("", str),
     "plugin_nocodb_base_id": ("", str),
-    "plugin_nocodb_base_title": ("", str),
     "plugin_nocodb_orders_table_id": ("", str),
     "plugin_nocodb_tickets_table_id": ("", str),
     "plugin_nocodb_questions_table_id": ("", str),
@@ -35,7 +34,6 @@ class NocoDBConfig:
     api_token: str
     workspace_id: str
     base_id: str
-    base_title: str
     orders_table_id: str
     tickets_table_id: str
     questions_table_id: str
@@ -49,7 +47,6 @@ class NocoDBConfig:
             api_token=settings.get("api_token", default=""),
             workspace_id=settings.get("workspace_id", default=""),
             base_id=settings.get("base_id", default=""),
-            base_title=settings.get("base_title", default=""),
             orders_table_id=settings.get("orders_table_id", default=""),
             tickets_table_id=settings.get("tickets_table_id", default=""),
             questions_table_id=settings.get("questions_table_id", default=""),
@@ -57,4 +54,9 @@ class NocoDBConfig:
 
     @property
     def can_sync(self) -> bool:
-        return self.enabled and bool(self.api_url.strip()) and bool(self.api_token.strip())
+        return (
+            self.enabled
+            and bool(self.api_url.strip())
+            and bool(self.api_token.strip())
+            and bool(self.base_id.strip())
+        )

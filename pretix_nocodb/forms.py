@@ -29,12 +29,8 @@ class NocoDBSettingsForm(SettingsForm):
     plugin_nocodb_base_id = forms.CharField(
         label=_("Base ID"),
         help_text=_(
-            "Optional. If empty, the plugin looks up or creates a base named after this event."
+            "ID of the NocoDB base that holds this event's data. "
+            "Create the base in NocoDB first, then paste its ID here."
         ),
-        required=False,
-    )
-    plugin_nocodb_base_title = forms.CharField(
-        label=_("Base title"),
-        help_text=_("Title used when creating a new base. Defaults to pretix_<organizer>_<event>."),
-        required=False,
+        required=True,
     )

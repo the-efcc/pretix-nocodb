@@ -6,7 +6,8 @@
     <p>
         {% blocktrans trimmed %}
             Configure the NocoDB instance to sync this event's orders, tickets and answers to.
-            Tables are created automatically the first time a sync runs.
+            Create a base in NocoDB first and paste its ID below; the plugin will only
+            create the orders and tickets tables inside that base.
         {% endblocktrans %}
     </p>
     <form action="" method="post" class="form-horizontal">
@@ -17,7 +18,6 @@
         {% bootstrap_field form.plugin_nocodb_api_token layout="horizontal" %}
         {% bootstrap_field form.plugin_nocodb_workspace_id layout="horizontal" %}
         {% bootstrap_field form.plugin_nocodb_base_id layout="horizontal" %}
-        {% bootstrap_field form.plugin_nocodb_base_title layout="horizontal" %}
         <div class="form-group submit-group">
             <button type="submit" class="btn btn-primary btn-save">
                 {% trans "Save" %}

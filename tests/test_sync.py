@@ -328,6 +328,12 @@ class MissingColumnNameResponseClient(FakeNocoDBClient):
         return self.tables[table_id]
 
 
+def _attach_base(event, client) -> str:
+    base = client.create_base("pretix")
+    event.settings.set("plugin_nocodb_base_id", base["id"])
+    return base["id"]
+
+
 def test_sync_creates_schema_before_ticket_rows(event, order):
     item = Item.objects.create(
         event=event,
@@ -355,6 +361,7 @@ def test_sync_creates_schema_before_ticket_rows(event, order):
     position.answers.get(question=question).options.add(option)
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     service.sync_order(order)
@@ -384,6 +391,7 @@ def test_sync_links_tickets_to_orders(event, order):
     )
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     service.sync_order(order)
@@ -419,6 +427,7 @@ def test_sync_updates_existing_question_column_title(event):
     )
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     service.sync_schema()
@@ -445,6 +454,7 @@ def test_sync_truncates_long_question_titles_for_nocodb(event):
     )
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     service.sync_schema()
@@ -619,6 +629,7 @@ def test_sync_choice_question_becomes_single_select(event, order):
     answer.options.add(option_s)
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     service.sync_order(order)
@@ -667,6 +678,7 @@ def test_sync_choice_multiple_question_becomes_multi_select(event, order):
     answer.options.add(option_a, option_b)
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     service.sync_order(order)
@@ -709,6 +721,7 @@ def test_sync_handles_create_column_responses_without_column_name(event, order):
     QuestionAnswer.objects.create(orderposition=position, question=question, answer="Acme")
 
     client = MissingColumnNameResponseClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     service.sync_order(order)
@@ -737,6 +750,7 @@ def test_sync_upgrades_item_and_variation_columns_to_single_select(event, order)
     )
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
     service.sync_order(order)
 
@@ -783,6 +797,7 @@ def test_sync_extracts_attendee_name_parts(event, order):
     )
 
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
     service.sync_order(order)
 
@@ -1011,8 +1026,23 @@ def test_sync_deletes_duplicate_ticket_rows(event, order):
     assert first_id not in {row["Id"] for row in rows}
 
 
+def test_sync_skips_when_base_id_missing(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(order=order, item=item, price=Decimal("10"))
+
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+
+    assert service.sync_schema() is None
+    service.sync_order(order)
+
+    assert client.bases == []
+    assert client.tables == {}
+
+
 def test_sync_uses_stable_tables(event):
     client = FakeNocoDBClient()
+    _attach_base(event, client)
     service = NocoDBSyncService(event, client=client)
 
     schema = service.sync_schema()

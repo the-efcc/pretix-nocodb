@@ -200,21 +200,7 @@ class NocoDBSyncService:
         self._upsert_tickets(schema, order, order_row_id)
 
     def _ensure_base(self) -> str:
-        client = self._get_client()
-        if self.config.base_id:
-            return self.config.base_id
-
-        title = self.config.base_title or self._default_base_title()
-        for base in client.list_bases(self.config.workspace_id):
-            if base.get("title") == title:
-                self._persist_setting("base_id", base["id"])
-                self.config.base_id = base["id"]
-                return base["id"]
-
-        created = client.create_base(title, workspace_id=self.config.workspace_id)
-        self._persist_setting("base_id", created["id"])
-        self.config.base_id = created["id"]
-        return created["id"]
+        return self.config.base_id
 
     def _ensure_tables(self, base_id: str) -> dict[str, str]:
         client = self._get_client()
@@ -872,9 +858,6 @@ class NocoDBSyncService:
 
     def _question_column_name(self, identifier: Any) -> str:
         return f"q_{identifier}"
-
-    def _default_base_title(self) -> str:
-        return f"pretix_{self.event.organizer.slug}_{self.event.slug}"
 
     def _persist_setting(self, key: str, value: str) -> None:
         settings_for_event(self.event).set(key, value)
