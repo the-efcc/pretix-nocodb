@@ -122,8 +122,11 @@ class NocoDBClient:
         title: str,
         child_id: str,
         parent_id: str,
-        relation_type: str = "bt",
+        relation_type: str = "mo",
     ) -> dict[str, Any]:
+        # NocoDB v2 stores all link columns junction-backed. The link column is
+        # created on `table_id`; childId/parentId are reversed vs the legacy
+        # naming (childId = referenced table, parentId = holder table).
         return self._request(
             "POST",
             f"/api/v2/meta/tables/{table_id}/columns",
@@ -132,9 +135,43 @@ class NocoDBClient:
                 "childId": child_id,
                 "parentId": parent_id,
                 "type": relation_type,
-                "uidt": "LinkToAnotherRecord",
+                "uidt": "Links",
             },
         )
+
+    def link_records(
+        self,
+        table_id: str,
+        link_column_id: str,
+        record_id: int,
+        linked_id: int,
+    ) -> Any:
+        return self._request(
+            "POST",
+            f"/api/v2/tables/{table_id}/links/{link_column_id}/records/{record_id}",
+            json={"Id": linked_id},
+        )
+
+    def list_linked_records(
+        self,
+        table_id: str,
+        link_column_id: str,
+        record_id: int,
+        *,
+        fields: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"limit": limit}
+        if fields:
+            params["fields"] = ",".join(fields)
+        response = self._request(
+            "GET",
+            f"/api/v2/tables/{table_id}/links/{link_column_id}/records/{record_id}",
+            params=params,
+        )
+        if isinstance(response, dict):
+            return response.get("list", [])
+        return response or []
 
     def update_column(self, column_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"/api/v2/meta/columns/{column_id}", json=payload)

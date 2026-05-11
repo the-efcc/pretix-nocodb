@@ -16,6 +16,7 @@ from .plugin_settings import NocoDBConfig, settings_for_event
 
 TABLE_ORDERS = "orders"
 TABLE_TICKETS = "tickets"
+MAX_COLUMN_TITLE_LENGTH = 255
 
 ORDER_KEY_FIELD = "pretix_order_code"
 TICKET_KEY_FIELD = "pretix_position_id"
@@ -99,7 +100,7 @@ class SchemaState:
     orders_table_id: str
     tickets_table_id: str
     order_link_column_id: str
-    order_fk_column_name: str
+    order_reciprocal_link_column_id: str
     question_columns: dict[str, str]
 
 
@@ -127,10 +128,12 @@ class NocoDBSyncService:
 
         orders_table = self._fetch_table_state(table_ids[TABLE_ORDERS])
         tickets_table = self._fetch_table_state(table_ids[TABLE_TICKETS])
-        order_link_column_id, order_fk_column_name, tickets_table = self._ensure_order_link_column(
+        (
+            order_link_column_id,
+            order_reciprocal_link_column_id,
             orders_table,
             tickets_table,
-        )
+        ) = self._ensure_order_link_column(orders_table, tickets_table)
         tickets_table = self._delete_ticket_column(tickets_table, "order_code")
 
         questions = list(
@@ -140,8 +143,9 @@ class NocoDBSyncService:
         question_columns: dict[str, str] = {}
 
         for question in questions:
+            question_identifier = str(question.identifier)
             column_name = self._question_column_name(question.identifier)
-            question_title = question_titles[question.identifier]
+            question_title = question_titles[question_identifier]
             column = tickets_table.columns_by_name.get(column_name)
             if not column:
                 column = self._create_question_column(
@@ -153,13 +157,13 @@ class NocoDBSyncService:
             elif self._question_column_needs_update(column, question_title, question):
                 column = self._update_question_column(column, question, title=question_title)
                 self._upsert_table_state_column(tickets_table, column)
-            question_columns[question.identifier] = column["title"]
+            question_columns[question_identifier] = column["title"]
 
         return SchemaState(
             orders_table_id=orders_table.id,
             tickets_table_id=tickets_table.id,
             order_link_column_id=order_link_column_id,
-            order_fk_column_name=order_fk_column_name,
+            order_reciprocal_link_column_id=order_reciprocal_link_column_id,
             question_columns=question_columns,
         )
 
@@ -348,39 +352,72 @@ class NocoDBSyncService:
         self,
         orders_table: TableState,
         tickets_table: TableState,
-    ) -> tuple[str, str, TableState]:
-        column = next(
+    ) -> tuple[str, str, TableState, TableState]:
+        def find_v2_link(table: TableState) -> dict[str, Any] | None:
+            return next(
+                (
+                    candidate
+                    for candidate in table.columns
+                    if candidate.get("uidt") == "Links"
+                    and candidate.get("colOptions", {}).get("type") == "mo"
+                    and candidate.get("colOptions", {}).get("fk_related_model_id")
+                    == orders_table.id
+                    and candidate.get("title") == ORDER_LINK_FIELD
+                ),
+                None,
+            )
+
+        legacy = next(
             (
                 candidate
                 for candidate in tickets_table.columns
                 if candidate.get("uidt") == "LinkToAnotherRecord"
-                and candidate.get("colOptions", {}).get("type") == "bt"
                 and candidate.get("colOptions", {}).get("fk_related_model_id") == orders_table.id
                 and candidate.get("title") == ORDER_LINK_FIELD
             ),
             None,
         )
-        if column is None:
+        if legacy is not None:
+            client = self._get_client()
+            client.delete_column(legacy["id"])
+            tickets_table = self._fetch_table_state(tickets_table.id)
+            orders_table = self._fetch_table_state(orders_table.id)
+
+        link_column = find_v2_link(tickets_table)
+        if link_column is None:
             client = self._get_client()
             client.create_link_column(
                 tickets_table.id,
                 title=ORDER_LINK_FIELD,
-                child_id=tickets_table.id,
-                parent_id=orders_table.id,
+                child_id=orders_table.id,
+                parent_id=tickets_table.id,
             )
             tickets_table = self._fetch_table_state(tickets_table.id)
-            column = next(
+            orders_table = self._fetch_table_state(orders_table.id)
+            link_column = find_v2_link(tickets_table)
+            if link_column is None:
+                raise RuntimeError(f"Order link column {ORDER_LINK_FIELD} was not created")
+
+        link_col_options = link_column["colOptions"]
+        reciprocal = next(
+            (
                 candidate
-                for candidate in tickets_table.columns
-                if candidate.get("uidt") == "LinkToAnotherRecord"
-                and candidate.get("colOptions", {}).get("type") == "bt"
-                and candidate.get("colOptions", {}).get("fk_related_model_id") == orders_table.id
-                and candidate.get("title") == ORDER_LINK_FIELD
+                for candidate in orders_table.columns
+                if candidate.get("uidt") == "Links"
+                and candidate.get("colOptions", {}).get("type") == "om"
+                and candidate.get("colOptions", {}).get("fk_related_model_id")
+                == tickets_table.id
+                and candidate.get("colOptions", {}).get("fk_mm_model_id")
+                == link_col_options.get("fk_mm_model_id")
+            ),
+            None,
+        )
+        if reciprocal is None:
+            raise RuntimeError(
+                f"Reciprocal link column for {ORDER_LINK_FIELD} not found on orders table"
             )
 
-        fk_column_id = column["colOptions"]["fk_child_column_id"]
-        fk_column = tickets_table.columns_by_id[fk_column_id]
-        return column["id"], fk_column["column_name"], tickets_table
+        return link_column["id"], reciprocal["id"], orders_table, tickets_table
 
     def _delete_ticket_column(self, tickets_table: TableState, column_name: str) -> TableState:
         column = tickets_table.columns_by_name.get(column_name)
@@ -426,9 +463,10 @@ class NocoDBSyncService:
     def _upsert_tickets(self, schema: SchemaState, order: Order, order_row_id: int) -> None:
         client = self._get_client()
         order_obj = cast(Any, order)
-        existing_rows = client.list_records(
-            schema.tickets_table_id,
-            where=self._where_equals(schema.order_fk_column_name, order_row_id),
+        existing_rows = client.list_linked_records(
+            schema.orders_table_id,
+            schema.order_reciprocal_link_column_id,
+            order_row_id,
             fields=["Id", TICKET_KEY_FIELD],
             limit=1000,
         )
@@ -438,7 +476,7 @@ class NocoDBSyncService:
             if row.get(TICKET_KEY_FIELD) is not None
         }
         seen_position_ids: set[int] = set()
-        creates: list[dict[str, Any]] = []
+        creates: list[tuple[int, dict[str, Any]]] = []
         updates: list[dict[str, Any]] = []
 
         for position in (
@@ -446,14 +484,14 @@ class NocoDBSyncService:
             .prefetch_related("answers__question", "answers__options", "checkins")
             .order_by("positionid", "pk")
         ):
-            payload = self._ticket_payload(schema, order, position, order_row_id)
+            payload = self._ticket_payload(schema, order, position)
             seen_position_ids.add(position.pk)
             existing_id = existing_by_position_id.get(position.pk)
             if existing_id is not None:
                 payload["Id"] = existing_id
                 updates.append(payload)
             else:
-                creates.append(payload)
+                creates.append((position.pk, payload))
 
         stale_ids = [
             {"Id": row_id}
@@ -462,7 +500,16 @@ class NocoDBSyncService:
         ]
 
         if creates:
-            client.create_records(schema.tickets_table_id, creates)
+            created = client.create_records(
+                schema.tickets_table_id, [payload for _, payload in creates]
+            )
+            for (_, _), created_row in zip(creates, created, strict=True):
+                client.link_records(
+                    schema.tickets_table_id,
+                    schema.order_link_column_id,
+                    int(created_row["Id"]),
+                    order_row_id,
+                )
         if updates:
             client.update_records(schema.tickets_table_id, updates)
         if stale_ids:
@@ -515,7 +562,6 @@ class NocoDBSyncService:
         schema: SchemaState,
         order: Order,
         position,
-        order_row_id: int,
     ) -> dict[str, Any]:
         order_obj = cast(Any, order)
         position_obj = cast(Any, position)
@@ -523,7 +569,7 @@ class NocoDBSyncService:
         question_columns = dict.fromkeys(schema.question_columns.values())
 
         for answer in position_obj.answers.all():
-            question_identifier = answer.question.identifier
+            question_identifier = str(answer.question.identifier)
             question_columns[schema.question_columns[question_identifier]] = self._answer_value(
                 answer
             )
@@ -535,7 +581,6 @@ class NocoDBSyncService:
 
         return {
             TICKET_KEY_FIELD: position_obj.pk,
-            schema.order_fk_column_name: order_row_id,
             "order_status": self._status_label(order_obj.status),
             "positionid": position_obj.positionid,
             "pretix_item_id": position_obj.item_id,
@@ -636,7 +681,7 @@ class NocoDBSyncService:
 
     def _question_titles(self, questions: list[Question]) -> dict[str, str]:
         raw_titles: dict[str, str] = {
-            question.identifier: self._question_title(question) for question in questions
+            str(question.identifier): self._question_title(question) for question in questions
         }
         title_counts: dict[str, int] = {}
         for title in raw_titles.values():
@@ -644,16 +689,34 @@ class NocoDBSyncService:
 
         resolved: dict[str, str] = {}
         for question in questions:
-            base_title = raw_titles[question.identifier]
-            if title_counts[base_title] > 1:
-                resolved[question.identifier] = f"{base_title} ({question.identifier})"
-            else:
-                resolved[question.identifier] = base_title
+            identifier = str(question.identifier)
+            base_title = raw_titles[identifier]
+            title = (
+                f"{base_title} ({identifier})"
+                if title_counts[base_title] > 1
+                else base_title
+            )
+            resolved[identifier] = self._bounded_question_title(
+                title,
+                identifier,
+            )
         return resolved
 
     def _question_title(self, question: Question) -> str:
         question_obj = cast(Any, question)
         return self._i18n_to_str(question_obj.question).strip() or str(question_obj.identifier)
+
+    def _bounded_question_title(self, title: str, identifier: str) -> str:
+        if len(title) <= MAX_COLUMN_TITLE_LENGTH:
+            return title
+
+        duplicate_suffix = f" ({identifier})"
+        if title.endswith(duplicate_suffix):
+            title = title[: -len(duplicate_suffix)]
+
+        suffix = f"... ({identifier})"
+        prefix_length = max(MAX_COLUMN_TITLE_LENGTH - len(suffix), 1)
+        return f"{title[:prefix_length].rstrip()}{suffix}"
 
     def _question_column_name(self, identifier: Any) -> str:
         return f"q_{identifier}"

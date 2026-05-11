@@ -7,6 +7,7 @@ import pytest
 from pretix.base.models import Item, OrderPosition, Question, QuestionAnswer, QuestionOption
 
 from pretix_nocodb.sync import (
+    MAX_COLUMN_TITLE_LENGTH,
     ORDER_KEY_FIELD,
     ORDER_LINK_FIELD,
     ORDERS_COLUMNS,
@@ -24,10 +25,12 @@ class FakeNocoDBClient:
         self.bases: list[dict] = []
         self.tables: dict[str, dict] = {}
         self.records: dict[str, list[dict]] = {}
+        self.links: dict[str, list[tuple[str, int, str, int]]] = {}
         self.base_counter = 1
         self.table_counter = 1
         self.column_counter = 1
         self.record_counter = 1
+        self.junction_counter = 1
 
     def list_bases(self, _workspace_id: str = "", *, _page_size: int = 200):
         return self.bases
@@ -111,43 +114,99 @@ class FakeNocoDBClient:
         title: str,
         child_id: str,
         parent_id: str,
-        relation_type: str = "bt",
+        relation_type: str = "mo",
     ):
-        related_table = self.tables[parent_id]
-        parent_column = next(
-            (
-                column
-                for column in related_table["columns"]
-                if column.get("pv") or column.get("pk")
-            ),
-            related_table["columns"][0],
-        )
-        child_fk_name = self._unique_column_name(table_id, f"{related_table['title']}_id")
-        child_fk_column = {
-            "id": self._next_column_id(),
-            "fk_model_id": child_id,
-            "title": child_fk_name,
-            "column_name": child_fk_name,
-            "uidt": "ForeignKey",
-            "description": None,
-        }
+        # v2 semantics: link column lives on `table_id` (== parent_id), references `child_id`.
+        # A reciprocal Links column with the inverse type is created on `child_id`.
+        assert parent_id == table_id
+        related_table = self.tables[child_id]
+        junction_id = f"j_{self.junction_counter}"
+        self.junction_counter += 1
+        inverse = {"mo": "om", "om": "mo", "mm": "mm", "oo": "oo"}[relation_type]
         link_column = {
             "id": self._next_column_id(),
-            "fk_model_id": child_id,
+            "fk_model_id": table_id,
             "title": title,
             "column_name": None,
-            "uidt": "LinkToAnotherRecord",
+            "uidt": "Links",
             "virtual": True,
             "colOptions": {
                 "type": relation_type,
-                "fk_related_model_id": parent_id,
-                "fk_child_column_id": child_fk_column["id"],
-                "fk_parent_column_id": parent_column["id"],
+                "fk_related_model_id": child_id,
+                "fk_mm_model_id": junction_id,
             },
         }
-        self.tables[table_id]["columns"].append(child_fk_column)
+        reciprocal_column = {
+            "id": self._next_column_id(),
+            "fk_model_id": child_id,
+            "title": self.tables[table_id]["title"],
+            "column_name": None,
+            "uidt": "Links",
+            "virtual": True,
+            "colOptions": {
+                "type": inverse,
+                "fk_related_model_id": table_id,
+                "fk_mm_model_id": junction_id,
+            },
+        }
         self.tables[table_id]["columns"].append(link_column)
+        related_table["columns"].append(reciprocal_column)
+        self.links.setdefault(junction_id, [])
         return self.tables[table_id]
+
+    def _find_link_column(self, link_column_id: str) -> dict:
+        for table in self.tables.values():
+            for column in table["columns"]:
+                if column.get("id") == link_column_id and column.get("uidt") == "Links":
+                    return column
+        raise KeyError(link_column_id)
+
+    def link_records(
+        self,
+        table_id: str,
+        link_column_id: str,
+        record_id: int,
+        linked_id: int,
+    ):
+        link_col = self._find_link_column(link_column_id)
+        junction = link_col["colOptions"]["fk_mm_model_id"]
+        related_table_id = link_col["colOptions"]["fk_related_model_id"]
+        entries = self.links.setdefault(junction, [])
+        pair = (table_id, record_id, related_table_id, linked_id)
+        if pair not in entries:
+            entries.append(pair)
+        return None
+
+    def list_linked_records(
+        self,
+        table_id: str,
+        link_column_id: str,
+        record_id: int,
+        *,
+        fields=None,
+        limit: int = 200,
+    ):
+        link_col = self._find_link_column(link_column_id)
+        junction = link_col["colOptions"]["fk_mm_model_id"]
+        related_table_id = link_col["colOptions"]["fk_related_model_id"]
+        linked_ids: list[int] = []
+        for src_table, src_id, tgt_table, tgt_id in self.links.get(junction, []):
+            if src_table == table_id and src_id == record_id:
+                linked_ids.append(tgt_id)
+            elif tgt_table == table_id and tgt_id == record_id:
+                linked_ids.append(src_id)
+        related_records = [
+            row for row in self.records[related_table_id] if row["Id"] in linked_ids
+        ]
+        if fields:
+            related_records = [
+                {
+                    field: row.get(self._canonical_field(related_table_id, field))
+                    for field in fields
+                }
+                for row in related_records
+            ]
+        return related_records[:limit]
 
     def update_column(self, column_id: str, payload: dict):
         for table in self.tables.values():
@@ -305,12 +364,19 @@ def test_sync_links_tickets_to_orders(event, order):
     tickets_table = next(
         table for table in client.tables.values() if table["title"] == TABLE_TICKETS
     )
-    assert any(column["title"] == ORDER_LINK_FIELD for column in tickets_table["columns"])
-    assert any(column["column_name"] == "orders_id" for column in tickets_table["columns"])
+    link_col = next(
+        column
+        for column in tickets_table["columns"]
+        if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
+    )
+    assert link_col["colOptions"]["type"] == "mo"
+    assert link_col["colOptions"]["fk_related_model_id"] == orders_table["id"]
 
     order_row = client.records[orders_table["id"]][0]
     ticket_row = client.records[tickets_table["id"]][0]
-    assert ticket_row["orders_id"] == order_row["Id"]
+    linked = client.list_linked_records(tickets_table["id"], link_col["id"], ticket_row["Id"])
+    assert len(linked) == 1
+    assert linked[0]["Id"] == order_row["Id"]
 
 
 def test_sync_updates_existing_question_column_title(event):
@@ -339,7 +405,35 @@ def test_sync_updates_existing_question_column_title(event):
     assert question_column["title"] == "Display name"
 
 
-def test_sync_removes_legacy_order_code_and_matches_tickets_by_fk(event, order):
+def test_sync_truncates_long_question_titles_for_nocodb(event):
+    question = Question.objects.create(
+        event=event,
+        question="I understand the retreat rules and safety requirements. " * 8,
+        type=Question.TYPE_BOOLEAN,
+        required=True,
+        identifier="LONGTITLE",
+    )
+
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+
+    service.sync_schema()
+
+    tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    question_column = next(
+        column for column in tickets_table["columns"] if column.get("column_name") == "q_LONGTITLE"
+    )
+
+    assert len(question_column["title"]) <= MAX_COLUMN_TITLE_LENGTH
+    assert question_column["title"].endswith("... (LONGTITLE)")
+    assert question_column["description"] == (
+        f"pretix question {question.identifier}: {question.question}"
+    )
+
+
+def test_sync_removes_legacy_order_code_and_matches_tickets_by_link(event, order):
     item = Item.objects.create(
         event=event,
         name="Regular ticket",
@@ -365,23 +459,28 @@ def test_sync_removes_legacy_order_code_and_matches_tickets_by_fk(event, order):
     client.create_link_column(
         tickets_table["id"],
         title=ORDER_LINK_FIELD,
-        child_id=tickets_table["id"],
-        parent_id=orders_table["id"],
+        child_id=orders_table["id"],
+        parent_id=tickets_table["id"],
     )
     order_row_id = client.create_records(
         orders_table["id"],
         [{ORDER_KEY_FIELD: str(order.code)}],
     )[0]["Id"]
-    client.create_records(
+    ticket_row_id = client.create_records(
         tickets_table["id"],
         [
             {
                 "pretix_position_id": position.pk,
-                "orders_id": order_row_id,
                 "order_code": "WRONG-CODE",
             }
         ],
+    )[0]["Id"]
+    link_col = next(
+        column
+        for column in client.tables[tickets_table["id"]]["columns"]
+        if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
     )
+    client.link_records(tickets_table["id"], link_col["id"], ticket_row_id, order_row_id)
 
     service = NocoDBSyncService(event, client=client)
     service.config.base_id = base["id"]
@@ -396,7 +495,6 @@ def test_sync_removes_legacy_order_code_and_matches_tickets_by_fk(event, order):
 
     ticket_rows = client.records[updated_tickets_table["id"]]
     assert len(ticket_rows) == 1
-    assert ticket_rows[0]["orders_id"] == order_row_id
     assert ticket_rows[0]["order_status"] == "pending"
     assert "order_code" not in ticket_rows[0]
 
@@ -431,8 +529,8 @@ def test_sync_upgrades_country_question_to_single_select(event, order):
     client.create_link_column(
         tickets_table["id"],
         title=ORDER_LINK_FIELD,
-        child_id=tickets_table["id"],
-        parent_id=orders_table["id"],
+        child_id=orders_table["id"],
+        parent_id=tickets_table["id"],
     )
     client.create_column(
         tickets_table["id"],
@@ -452,7 +550,9 @@ def test_sync_upgrades_country_question_to_single_select(event, order):
         table for table in client.tables.values() if table["title"] == TABLE_TICKETS
     )
     country_column = next(
-        column for column in updated_tickets_table["columns"] if column.get("column_name") == "q_COUNTRY"
+        column
+        for column in updated_tickets_table["columns"]
+        if column.get("column_name") == "q_COUNTRY"
     )
     assert country_column["uidt"] == "SingleSelect"
     option_titles = [option["title"] for option in country_column["colOptions"]["options"]]
