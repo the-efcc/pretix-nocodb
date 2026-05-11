@@ -176,6 +176,9 @@ class NocoDBClient:
     def update_column(self, column_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"/api/v2/meta/columns/{column_id}", json=payload)
 
+    def set_primary_column(self, column_id: str) -> Any:
+        return self._request("POST", f"/api/v2/meta/columns/{column_id}/primary")
+
     def delete_column(self, column_id: str) -> Any:
         return self._request("DELETE", f"/api/v2/meta/columns/{column_id}")
 

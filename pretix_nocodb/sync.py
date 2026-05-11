@@ -67,14 +67,14 @@ ORDERS_COLUMNS = [
 ]
 
 TICKETS_COLUMNS = [
-    _column(TICKET_KEY_FIELD, "Number", pv=True, rqd=True),
+    _column(TICKET_KEY_FIELD, "Number", rqd=True),
     _column("order_status", "SingleLineText"),
     _column("positionid", "Number"),
     _column("pretix_item_id", "Number"),
     _column("pretix_variation_id", "Number"),
     _column("item_name", "SingleLineText"),
     _column("variation_name", "SingleLineText"),
-    _column("attendee_name", "SingleLineText"),
+    _column("attendee_name", "SingleLineText", pv=True),
     _column("attendee_email", "Email"),
     _column("seat", "SingleLineText"),
     _column("canceled", "Checkbox"),
@@ -166,6 +166,8 @@ class NocoDBSyncService:
         tickets_table = self._ensure_select_column(
             tickets_table, "variation_name", "Variation name", variation_names,
         )
+
+        tickets_table = self._ensure_primary_value(tickets_table, "attendee_name")
 
         return SchemaState(
             orders_table_id=orders_table.id,
@@ -476,6 +478,14 @@ class NocoDBSyncService:
                 "colOptions": {"options": desired_options},
             },
         )
+        return self._fetch_table_state(table_state.id)
+
+    def _ensure_primary_value(self, table_state: TableState, column_name: str) -> TableState:
+        column = table_state.columns_by_name.get(column_name)
+        if column is None or column.get("pv"):
+            return table_state
+        client = self._get_client()
+        client.set_primary_column(column["id"])
         return self._fetch_table_state(table_state.id)
 
     def _delete_ticket_column(self, tickets_table: TableState, column_name: str) -> TableState:

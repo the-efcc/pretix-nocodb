@@ -20,6 +20,7 @@ from pretix_nocodb.sync import (
     ORDERS_COLUMNS,
     TABLE_ORDERS,
     TABLE_TICKETS,
+    TICKET_KEY_FIELD,
     TICKETS_COLUMNS,
     NocoDBSyncService,
 )
@@ -107,6 +108,8 @@ class FakeNocoDBClient:
             "uidt": column["uidt"],
             "description": column.get("description"),
             "colOptions": column.get("colOptions"),
+            "pv": bool(column.get("pv")),
+            "rqd": bool(column.get("rqd")),
         }
         existing = self.tables[table_id]["columns"]
         if any(c["column_name"] == created["column_name"] for c in existing):
@@ -221,6 +224,16 @@ class FakeNocoDBClient:
                 if column["id"] == column_id:
                     column.update(payload)
                     return table
+        raise KeyError(column_id)
+
+    def set_primary_column(self, column_id: str):
+        for table in self.tables.values():
+            target = next((c for c in table["columns"] if c["id"] == column_id), None)
+            if target is None:
+                continue
+            for column in table["columns"]:
+                column["pv"] = column is target
+            return table
         raise KeyError(column_id)
 
     def delete_column(self, column_id: str):
@@ -743,6 +756,37 @@ def test_sync_upgrades_item_and_variation_columns_to_single_select(event, order)
     ticket_row = client.records[tickets_table["id"]][0]
     assert ticket_row["Item name"] == "Conference ticket"
     assert ticket_row["Variation name"] == "Early bird"
+
+
+def test_sync_promotes_attendee_name_as_primary_value(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
+    )
+
+    client = FakeNocoDBClient()
+    base = client.create_base("pretix")
+    client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
+    legacy_tickets_columns = []
+    for spec in TICKETS_COLUMNS:
+        adjusted = dict(spec)
+        if adjusted["column_name"] == TICKET_KEY_FIELD:
+            adjusted["pv"] = True
+        elif adjusted["column_name"] == "attendee_name":
+            adjusted.pop("pv", None)
+        legacy_tickets_columns.append(adjusted)
+    client.create_table(base["id"], title=TABLE_TICKETS, columns=legacy_tickets_columns)
+
+    service = NocoDBSyncService(event, client=client)
+    service.config.base_id = base["id"]
+    service.sync_order(order)
+
+    updated_tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    primary_columns = [column for column in updated_tickets_table["columns"] if column.get("pv")]
+    assert len(primary_columns) == 1
+    assert primary_columns[0]["column_name"] == "attendee_name"
 
 
 def test_sync_uses_stable_tables(event):
