@@ -20,3 +20,13 @@ def sync_order_to_nocodb(event, order_id: int) -> None:
             pk=order_id, event=event
         )
     NocoDBSyncService(event).sync_order(order)
+
+
+@app.task(base=EventTask, max_retries=3, default_retry_delay=10)
+def sync_all_orders_to_nocodb(event) -> None:
+    service = NocoDBSyncService(event)
+    service.sync_schema()
+    with scopes_disabled():
+        orders = list(Order.objects.filter(event=event))
+    for order in orders:
+        service.sync_order(order)
