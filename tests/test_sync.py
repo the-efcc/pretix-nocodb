@@ -261,15 +261,22 @@ class FakeNocoDBClient:
     ):
         records = list(self.records[table_id])
         if where:
-            match = re.match(r'@\("(?P<field>[^"]+)",eq,(?P<value>.+)\)$', where)
+            match = re.match(
+                r'@\("(?P<field>[^"]+)",(?P<op>eq|in),(?P<rest>.+)\)$', where
+            )
             assert match, where
             field = self._canonical_field(table_id, match.group("field"))
-            raw_value = match.group("value")
-            if raw_value.startswith('"') and raw_value.endswith('"'):
-                value = raw_value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            op = match.group("op")
+            rest = match.group("rest")
+            if op == "eq":
+                if rest.startswith('"') and rest.endswith('"'):
+                    value = rest[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                else:
+                    value = int(rest)
+                records = [record for record in records if record.get(field) == value]
             else:
-                value = int(raw_value)
-            records = [record for record in records if record.get(field) == value]
+                values = {int(part) for part in rest.split(",")}
+                records = [record for record in records if record.get(field) in values]
         if fields:
             records = [
                 {
@@ -851,6 +858,98 @@ def test_sync_promotes_attendee_name_as_primary_value(event, order):
     primary_columns = [column for column in updated_tickets_table["columns"] if column.get("pv")]
     assert len(primary_columns) == 1
     assert primary_columns[0]["column_name"] == "attendee_name"
+
+
+def test_sync_links_orphan_ticket_rows_without_duplicating(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    position = OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
+    )
+
+    client = FakeNocoDBClient()
+    base = client.create_base("pretix")
+    orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
+    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    client.create_link_column(
+        tickets_table["id"],
+        title=ORDER_LINK_FIELD,
+        child_id=orders_table["id"],
+        parent_id=tickets_table["id"],
+    )
+    order_row_id = client.create_records(
+        orders_table["id"], [{ORDER_KEY_FIELD: str(order.code)}],
+    )[0]["Id"]
+    # Orphan: ticket exists with the right position id but no link
+    orphan_id = client.create_records(
+        tickets_table["id"], [{TICKET_KEY_FIELD: position.pk}],
+    )[0]["Id"]
+
+    service = NocoDBSyncService(event, client=client)
+    service.config.base_id = base["id"]
+    service.sync_order(order)
+
+    updated_tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    rows = [r for r in client.records[updated_tickets_table["id"]] if r.get(TICKET_KEY_FIELD)]
+    assert len(rows) == 1
+    assert rows[0]["Id"] == orphan_id
+
+    link_col = next(
+        column
+        for column in updated_tickets_table["columns"]
+        if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
+    )
+    linked = client.list_linked_records(
+        updated_tickets_table["id"], link_col["id"], orphan_id,
+    )
+    assert [row["Id"] for row in linked] == [order_row_id]
+
+
+def test_sync_deletes_duplicate_ticket_rows(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    position = OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
+    )
+
+    client = FakeNocoDBClient()
+    base = client.create_base("pretix")
+    orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
+    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    client.create_link_column(
+        tickets_table["id"],
+        title=ORDER_LINK_FIELD,
+        child_id=orders_table["id"],
+        parent_id=tickets_table["id"],
+    )
+    order_row_id = client.create_records(
+        orders_table["id"], [{ORDER_KEY_FIELD: str(order.code)}],
+    )[0]["Id"]
+    first_id = client.create_records(
+        tickets_table["id"], [{TICKET_KEY_FIELD: position.pk}],
+    )[0]["Id"]
+    second_id = client.create_records(
+        tickets_table["id"], [{TICKET_KEY_FIELD: position.pk}],
+    )[0]["Id"]
+    link_col = next(
+        column
+        for column in client.tables[tickets_table["id"]]["columns"]
+        if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
+    )
+    client.link_records(tickets_table["id"], link_col["id"], second_id, order_row_id)
+
+    service = NocoDBSyncService(event, client=client)
+    service.config.base_id = base["id"]
+    service.sync_order(order)
+
+    updated_tickets_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    )
+    rows = client.records[updated_tickets_table["id"]]
+    assert len(rows) == 1
+    # The linked row is preferred over the orphan during dedup.
+    assert rows[0]["Id"] == second_id
+    assert first_id not in {row["Id"] for row in rows}
 
 
 def test_sync_uses_stable_tables(event):

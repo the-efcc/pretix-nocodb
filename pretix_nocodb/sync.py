@@ -552,41 +552,77 @@ class NocoDBSyncService:
     def _upsert_tickets(self, schema: SchemaState, order: Order, order_row_id: int) -> None:
         client = self._get_client()
         order_obj = cast(Any, order)
-        existing_rows = client.list_linked_records(
+
+        positions = list(
+            order_obj.all_positions.select_related("item", "variation", "seat")
+            .prefetch_related("answers__question", "answers__options", "checkins")
+            .order_by("positionid", "pk")
+        )
+        position_pks = [position.pk for position in positions]
+        position_pks_set = set(position_pks)
+
+        linked_rows = client.list_linked_records(
             schema.orders_table_id,
             schema.order_reciprocal_link_column_id,
             order_row_id,
             fields=["Id", TICKET_KEY_FIELD],
             limit=1000,
         )
-        existing_by_position_id = {
-            int(row[TICKET_KEY_FIELD]): row["Id"]
-            for row in existing_rows
-            if row.get(TICKET_KEY_FIELD) is not None
-        }
-        seen_position_ids: set[int] = set()
+        linked_ids: set[int] = {int(row["Id"]) for row in linked_rows}
+
+        row_position_pk: dict[int, int | None] = {}
+        for row in linked_rows:
+            pk_val = row.get(TICKET_KEY_FIELD)
+            row_position_pk[int(row["Id"])] = int(pk_val) if pk_val is not None else None
+
+        # Also pull any tickets keyed by the current positions; that catches
+        # orphan rows whose order link was lost (e.g. legacy column migration)
+        # plus duplicate rows that a previous broken sync created.
+        if position_pks:
+            for row in client.list_records(
+                schema.tickets_table_id,
+                where=self._where_in(TICKET_KEY_FIELD, position_pks),
+                fields=["Id", TICKET_KEY_FIELD],
+                limit=max(len(position_pks) * 4, 200),
+            ):
+                pk_val = row.get(TICKET_KEY_FIELD)
+                if pk_val is None:
+                    continue
+                row_position_pk.setdefault(int(row["Id"]), int(pk_val))
+
+        by_position: dict[int, list[int]] = {}
+        stale_ids: list[int] = []
+        for row_id, pk_val in row_position_pk.items():
+            if pk_val is None:
+                continue
+            if pk_val in position_pks_set:
+                by_position.setdefault(pk_val, []).append(row_id)
+            else:
+                stale_ids.append(row_id)
+
+        canonical: dict[int, int] = {}
+        duplicate_row_ids: list[int] = []
+        for pk, row_ids in by_position.items():
+            sorted_ids = sorted(row_ids, key=lambda rid: (rid not in linked_ids, rid))
+            canonical[pk] = sorted_ids[0]
+            duplicate_row_ids.extend(sorted_ids[1:])
+
+        if duplicate_row_ids:
+            client.delete_records(
+                schema.tickets_table_id,
+                [{"Id": row_id} for row_id in duplicate_row_ids],
+            )
+
         creates: list[tuple[int, dict[str, Any]]] = []
         updates: list[dict[str, Any]] = []
-
-        for position in (
-            order_obj.all_positions.select_related("item", "variation", "seat")
-            .prefetch_related("answers__question", "answers__options", "checkins")
-            .order_by("positionid", "pk")
-        ):
+        for position in positions:
             payload = self._ticket_payload(schema, order, position)
-            seen_position_ids.add(position.pk)
-            existing_id = existing_by_position_id.get(position.pk)
+            existing_id = canonical.get(position.pk)
             if existing_id is not None:
                 payload["Id"] = existing_id
                 updates.append(payload)
             else:
                 creates.append((position.pk, payload))
-
-        stale_ids = [
-            {"Id": row_id}
-            for position_id, row_id in existing_by_position_id.items()
-            if position_id not in seen_position_ids
-        ]
 
         if creates:
             created = client.create_records(
@@ -599,10 +635,23 @@ class NocoDBSyncService:
                     int(created_row["Id"]),
                     order_row_id,
                 )
+
         if updates:
             client.update_records(schema.tickets_table_id, updates)
+
+        for row_id in canonical.values():
+            if row_id not in linked_ids:
+                client.link_records(
+                    schema.tickets_table_id,
+                    schema.order_link_column_id,
+                    row_id,
+                    order_row_id,
+                )
+
         if stale_ids:
-            client.delete_records(schema.tickets_table_id, stale_ids)
+            client.delete_records(
+                schema.tickets_table_id, [{"Id": row_id} for row_id in stale_ids]
+            )
 
     def _order_payload(self, order: Order) -> dict[str, Any]:
         order_obj = cast(Any, order)
@@ -826,6 +875,10 @@ class NocoDBSyncService:
             escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
             encoded = f'"{escaped}"'
         return f'@("{field}",eq,{encoded})'
+
+    def _where_in(self, field: str, values: list[int]) -> str:
+        encoded = ",".join(str(int(value)) for value in values)
+        return f'@("{field}",in,{encoded})'
 
     def _status_label(self, status: Any) -> str:
         return {
