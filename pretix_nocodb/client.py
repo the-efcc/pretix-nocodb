@@ -180,6 +180,22 @@ class NocoDBClient:
     def update_view(self, view_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"/api/v2/meta/views/{view_id}", json=payload)
 
+    def list_view_columns(self, view_id: str) -> list[dict[str, Any]]:
+        response = self._request("GET", f"/api/v2/meta/views/{view_id}/columns")
+        return response.get("list", [])
+
+    def update_view_column(
+        self,
+        view_id: str,
+        view_column_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request(
+            "PATCH",
+            f"/api/v2/meta/views/{view_id}/columns/{view_column_id}",
+            json=payload,
+        )
+
     def update_column(self, column_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"/api/v2/meta/columns/{column_id}", json=payload)
 

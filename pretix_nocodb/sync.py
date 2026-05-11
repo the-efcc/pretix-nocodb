@@ -183,8 +183,13 @@ class NocoDBSyncService:
 
         participants_table = self._ensure_primary_value(participants_table, "attendee_name")
 
-        self._ensure_view_title(orders_table.id, "all")
-        self._ensure_view_title(participants_table.id, "all")
+        self._ensure_view_title(orders_table.id, "All")
+        participants_view_id = self._ensure_view_title(participants_table.id, "All")
+        if participants_view_id and not self._participants_view_defaults_applied(
+            participants_view_id,
+        ):
+            self._ensure_participants_view_columns(participants_table, participants_view_id)
+            self._persist_setting("participants_view_defaults_view_id", participants_view_id)
 
         return SchemaState(
             orders_table_id=orders_table.id,
@@ -504,11 +509,34 @@ class NocoDBSyncService:
             return self._fetch_table_state(table_state.id)
         return table_state
 
-    def _ensure_view_title(self, table_id: str, title: str) -> None:
+    def _ensure_view_title(self, table_id: str, title: str) -> str | None:
         client = self._get_client()
         views = client.list_views(table_id)
-        if views and views[0].get("title") != title:
-            client.update_view(views[0]["id"], {"title": title})
+        if not views:
+            return None
+        view = views[0]
+        if view.get("title") != title:
+            client.update_view(view["id"], {"title": title})
+        return view["id"]
+
+    def _participants_view_defaults_applied(self, view_id: str) -> bool:
+        stored = settings_for_event(self.event).get(
+            "participants_view_defaults_view_id", default=""
+        )
+        return stored == view_id
+
+    def _ensure_participants_view_columns(
+        self, participants_table: TableState, view_id: str
+    ) -> None:
+        client = self._get_client()
+        for vc in client.list_view_columns(view_id):
+            col = participants_table.columns_by_id.get(vc.get("fk_column_id", ""))
+            if col is None:
+                continue
+            col_name = col.get("column_name") or ""
+            should_show = col_name == "attendee_name" or col_name.startswith("q_")
+            if vc.get("show") != should_show:
+                client.update_view_column(view_id, vc["id"], {"show": should_show})
 
     def _ensure_primary_value(self, table_state: TableState, column_name: str) -> TableState:
         column = table_state.columns_by_name.get(column_name)

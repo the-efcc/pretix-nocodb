@@ -34,12 +34,14 @@ class FakeNocoDBClient:
         self.bases: list[dict] = []
         self.tables: dict[str, dict] = {}
         self.views: dict[str, list[dict]] = {}
+        self.view_columns: dict[str, list[dict]] = {}
         self.records: dict[str, list[dict]] = {}
         self.links: dict[str, list[tuple[str, int, str, int]]] = {}
         self.base_counter = 1
         self.table_counter = 1
         self.column_counter = 1
         self.view_counter = 1
+        self.view_column_counter = 1
         self.record_counter = 1
         self.junction_counter = 1
 
@@ -71,6 +73,7 @@ class FakeNocoDBClient:
         view_id = f"v_{self.view_counter}"
         self.view_counter += 1
         self.views[table_id] = [{"id": view_id, "title": title, "type": 0}]
+        self.view_columns[view_id] = []
         for column in columns:
             self.create_column(table_id, column)
         return table
@@ -121,6 +124,15 @@ class FakeNocoDBClient:
         if any(c["column_name"] == created["column_name"] for c in existing):
             raise ValueError("duplicate column")
         existing.append(created)
+        for view in self.views.get(table_id, []):
+            vc_id = f"vc_{self.view_column_counter}"
+            self.view_column_counter += 1
+            self.view_columns.setdefault(view["id"], []).append({
+                "id": vc_id,
+                "fk_view_id": view["id"],
+                "fk_column_id": created["id"],
+                "show": True,
+            })
         return created
 
     def create_link_column(
@@ -267,6 +279,16 @@ class FakeNocoDBClient:
                     view.update(payload)
                     return view
         raise KeyError(view_id)
+
+    def list_view_columns(self, view_id: str) -> list[dict]:
+        return list(self.view_columns.get(view_id, []))
+
+    def update_view_column(self, view_id: str, view_column_id: str, payload: dict) -> dict:
+        for vc in self.view_columns.get(view_id, []):
+            if vc["id"] == view_column_id:
+                vc.update(payload)
+                return vc
+        raise KeyError(view_column_id)
 
     def list_records(
         self,
@@ -1105,4 +1127,38 @@ def test_sync_renames_default_views_to_all(event):
     for table_id, views in client.views.items():
         assert views[0]["title"] == "All", (
             f"default view of table {client.tables[table_id]['title']!r} should be 'All'"
+        )
+
+
+def test_sync_hides_non_essential_participant_columns(event, order):
+    question = Question.objects.create(
+        event=event, question="Company", type=Question.TYPE_STRING, required=False, identifier="CO",
+    )
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    question.items.add(item)
+    OrderPosition.objects.create(
+        order=order,
+        item=item,
+        price=Decimal("10"),
+        attendee_name_cached="Ada",
+    )
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+
+    service.sync_schema()
+
+    participants_table = next(t for t in client.tables.values() if t["title"] == TABLE_PARTICIPANTS)
+    view_id = client.views[participants_table["id"]][0]["id"]
+    col_by_id = {c["id"]: c for c in participants_table["columns"]}
+
+    for vc in client.view_columns[view_id]:
+        col = col_by_id.get(vc["fk_column_id"])
+        if col is None:
+            continue
+        col_name = col.get("column_name") or ""
+        expected_show = col_name == "attendee_name" or col_name.startswith("q_")
+        assert vc["show"] == expected_show, (
+            f"column {col_name!r}: show={vc['show']}, expected {expected_show}"
         )
