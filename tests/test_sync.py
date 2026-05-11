@@ -22,9 +22,7 @@ from pretix_nocodb.sync import (
     PARTICIPANTS_COLUMNS,
     STATUS_OPTIONS,
     TABLE_ORDERS,
-    TABLE_TICKETS,
-    TICKET_KEY_FIELD,
-    TICKETS_COLUMNS,
+    TABLE_PARTICIPANTS,
     NocoDBSyncService,
 )
 
@@ -334,7 +332,7 @@ def _attach_base(event, client) -> str:
     return base["id"]
 
 
-def test_sync_creates_schema_before_ticket_rows(event, order):
+def test_sync_creates_schema_before_participant_rows(event, order):
     item = Item.objects.create(
         event=event,
         name="Conference ticket",
@@ -366,19 +364,19 @@ def test_sync_creates_schema_before_ticket_rows(event, order):
 
     service.sync_order(order)
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
-    question_columns = {column["column_name"] for column in tickets_table["columns"]}
+    question_columns = {column["column_name"] for column in participants_table["columns"]}
     assert "q_TSHIRT" in question_columns
-    assert any(column["title"] == "T-Shirt size" for column in tickets_table["columns"])
+    assert any(column["title"] == "T-Shirt size" for column in participants_table["columns"])
 
-    ticket_row = client.records[tickets_table["id"]][0]
+    ticket_row = client.records[participants_table["id"]][0]
     assert ticket_row["T-Shirt size"] == "L"
     assert ticket_row["answers_json"]["TSHIRT"]["option_identifiers"] == ["SIZE_L"]
 
 
-def test_sync_links_tickets_to_orders(event, order):
+def test_sync_links_participants_to_orders(event, order):
     item = Item.objects.create(
         event=event,
         name="Regular ticket",
@@ -399,20 +397,20 @@ def test_sync_links_tickets_to_orders(event, order):
     orders_table = next(
         table for table in client.tables.values() if table["title"] == TABLE_ORDERS
     )
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     link_col = next(
         column
-        for column in tickets_table["columns"]
+        for column in participants_table["columns"]
         if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
     )
     assert link_col["colOptions"]["type"] == "mo"
     assert link_col["colOptions"]["fk_related_model_id"] == orders_table["id"]
 
     order_row = client.records[orders_table["id"]][0]
-    ticket_row = client.records[tickets_table["id"]][0]
-    linked = client.list_linked_records(tickets_table["id"], link_col["id"], ticket_row["Id"])
+    ticket_row = client.records[participants_table["id"]][0]
+    linked = client.list_linked_records(participants_table["id"], link_col["id"], ticket_row["Id"])
     assert len(linked) == 1
     assert linked[0]["Id"] == order_row["Id"]
 
@@ -435,11 +433,11 @@ def test_sync_updates_existing_question_column_title(event):
     question.save(update_fields=["question"])
     service.sync_schema()
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     question_column = next(
-        column for column in tickets_table["columns"] if column.get("column_name") == "q_NICK"
+        column for column in participants_table["columns"] if column.get("column_name") == "q_NICK"
     )
     assert question_column["title"] == "Display name"
 
@@ -459,11 +457,13 @@ def test_sync_truncates_long_question_titles_for_nocodb(event):
 
     service.sync_schema()
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     question_column = next(
-        column for column in tickets_table["columns"] if column.get("column_name") == "q_LONGTITLE"
+        column
+        for column in participants_table["columns"]
+        if column.get("column_name") == "q_LONGTITLE"
     )
 
     assert len(question_column["title"]) <= MAX_COLUMN_TITLE_LENGTH
@@ -473,7 +473,7 @@ def test_sync_truncates_long_question_titles_for_nocodb(event):
     )
 
 
-def test_sync_removes_legacy_order_code_and_matches_tickets_by_link(event, order):
+def test_sync_removes_legacy_order_code_and_matches_participants_by_link(event, order):
     item = Item.objects.create(
         event=event,
         name="Regular ticket",
@@ -489,25 +489,29 @@ def test_sync_removes_legacy_order_code_and_matches_tickets_by_link(event, order
     client = FakeNocoDBClient()
     base = client.create_base("pretix")
     orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
-    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    participants_table = client.create_table(
+        base["id"],
+        title=TABLE_PARTICIPANTS,
+        columns=PARTICIPANTS_COLUMNS,
+    )
     legacy_order_code = {
         "title": "order_code",
         "column_name": "order_code",
         "uidt": "SingleLineText",
     }
-    client.create_column(tickets_table["id"], legacy_order_code)
+    client.create_column(participants_table["id"], legacy_order_code)
     client.create_link_column(
-        tickets_table["id"],
+        participants_table["id"],
         title=ORDER_LINK_FIELD,
         child_id=orders_table["id"],
-        parent_id=tickets_table["id"],
+        parent_id=participants_table["id"],
     )
     order_row_id = client.create_records(
         orders_table["id"],
         [{ORDER_KEY_FIELD: str(order.code)}],
     )[0]["Id"]
     ticket_row_id = client.create_records(
-        tickets_table["id"],
+        participants_table["id"],
         [
             {
                 "pretix_position_id": position.pk,
@@ -517,23 +521,24 @@ def test_sync_removes_legacy_order_code_and_matches_tickets_by_link(event, order
     )[0]["Id"]
     link_col = next(
         column
-        for column in client.tables[tickets_table["id"]]["columns"]
+        for column in client.tables[participants_table["id"]]["columns"]
         if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
     )
-    client.link_records(tickets_table["id"], link_col["id"], ticket_row_id, order_row_id)
+    client.link_records(participants_table["id"], link_col["id"], ticket_row_id, order_row_id)
 
     service = NocoDBSyncService(event, client=client)
     service.config.base_id = base["id"]
     service.sync_order(order)
 
-    updated_tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    updated_participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     assert all(
-        column.get("column_name") != "order_code" for column in updated_tickets_table["columns"]
+        column.get("column_name") != "order_code"
+        for column in updated_participants_table["columns"]
     )
 
-    ticket_rows = client.records[updated_tickets_table["id"]]
+    ticket_rows = client.records[updated_participants_table["id"]]
     assert len(ticket_rows) == 1
     assert ticket_rows[0]["Order status"] == "pending"
     assert "order_code" not in ticket_rows[0]
@@ -565,15 +570,19 @@ def test_sync_upgrades_country_question_to_single_select(event, order):
     client = FakeNocoDBClient()
     base = client.create_base("pretix")
     orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
-    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    participants_table = client.create_table(
+        base["id"],
+        title=TABLE_PARTICIPANTS,
+        columns=PARTICIPANTS_COLUMNS,
+    )
     client.create_link_column(
-        tickets_table["id"],
+        participants_table["id"],
         title=ORDER_LINK_FIELD,
         child_id=orders_table["id"],
-        parent_id=tickets_table["id"],
+        parent_id=participants_table["id"],
     )
     client.create_column(
-        tickets_table["id"],
+        participants_table["id"],
         {
             "title": "Country",
             "column_name": "q_COUNTRY",
@@ -586,19 +595,19 @@ def test_sync_upgrades_country_question_to_single_select(event, order):
     service.config.base_id = base["id"]
     service.sync_order(order)
 
-    updated_tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    updated_participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     country_column = next(
         column
-        for column in updated_tickets_table["columns"]
+        for column in updated_participants_table["columns"]
         if column.get("column_name") == "q_COUNTRY"
     )
     assert country_column["uidt"] == "SingleSelect"
     option_titles = [option["title"] for option in country_column["colOptions"]["options"]]
     assert "Germany" in option_titles
 
-    ticket_row = client.records[updated_tickets_table["id"]][0]
+    ticket_row = client.records[updated_participants_table["id"]][0]
     assert ticket_row["Country"] == "Germany"
 
 
@@ -634,17 +643,17 @@ def test_sync_choice_question_becomes_single_select(event, order):
 
     service.sync_order(order)
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     column = next(
-        col for col in tickets_table["columns"] if col.get("column_name") == "q_TSHIRT"
+        col for col in participants_table["columns"] if col.get("column_name") == "q_TSHIRT"
     )
     assert column["uidt"] == "SingleSelect"
     option_titles = [option["title"] for option in column["colOptions"]["options"]]
     assert option_titles == ["S", "M"]
 
-    ticket_row = client.records[tickets_table["id"]][0]
+    ticket_row = client.records[participants_table["id"]][0]
     assert ticket_row["T-Shirt size"] == "S"
 
 
@@ -683,17 +692,17 @@ def test_sync_choice_multiple_question_becomes_multi_select(event, order):
 
     service.sync_order(order)
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     column = next(
-        col for col in tickets_table["columns"] if col.get("column_name") == "q_TRACKS"
+        col for col in participants_table["columns"] if col.get("column_name") == "q_TRACKS"
     )
     assert column["uidt"] == "MultiSelect"
     option_titles = [option["title"] for option in column["colOptions"]["options"]]
     assert option_titles == ["Alpha", "Beta", "Gamma"]
 
-    ticket_row = client.records[tickets_table["id"]][0]
+    ticket_row = client.records[participants_table["id"]][0]
     assert ticket_row["Preferred tracks"] == "Alpha,Beta"
 
 
@@ -726,13 +735,13 @@ def test_sync_handles_create_column_responses_without_column_name(event, order):
 
     service.sync_order(order)
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
-    question_columns = {column["column_name"] for column in tickets_table["columns"]}
+    question_columns = {column["column_name"] for column in participants_table["columns"]}
     assert "q_COMPANY" in question_columns
 
-    ticket_row = client.records[tickets_table["id"]][0]
+    ticket_row = client.records[participants_table["id"]][0]
     assert ticket_row["Company"] == "Acme"
 
 
@@ -754,15 +763,17 @@ def test_sync_upgrades_item_and_variation_columns_to_single_select(event, order)
     service = NocoDBSyncService(event, client=client)
     service.sync_order(order)
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
     item_column = next(
-        column for column in tickets_table["columns"] if column.get("column_name") == "item_name"
+        column
+        for column in participants_table["columns"]
+        if column.get("column_name") == "item_name"
     )
     variation_column = next(
         column
-        for column in tickets_table["columns"]
+        for column in participants_table["columns"]
         if column.get("column_name") == "variation_name"
     )
     assert item_column["uidt"] == "SingleSelect"
@@ -777,7 +788,7 @@ def test_sync_upgrades_item_and_variation_columns_to_single_select(event, order)
         "Regular",
     ]
 
-    ticket_row = client.records[tickets_table["id"]][0]
+    ticket_row = client.records[participants_table["id"]][0]
     assert ticket_row["Item name"] == "Conference ticket"
     assert ticket_row["Variation name"] == "Early bird"
 
@@ -801,13 +812,13 @@ def test_sync_extracts_attendee_name_parts(event, order):
     service = NocoDBSyncService(event, client=client)
     service.sync_order(order)
 
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
-    column_names = {column["column_name"] for column in tickets_table["columns"]}
+    column_names = {column["column_name"] for column in participants_table["columns"]}
     assert {"attendee_given_name", "attendee_family_name"} <= column_names
 
-    ticket_row = client.records[tickets_table["id"]][0]
+    ticket_row = client.records[participants_table["id"]][0]
     assert ticket_row["attendee_given_name"] == "Ada"
     assert ticket_row["attendee_family_name"] == "Lovelace"
 
@@ -827,22 +838,22 @@ def test_sync_backfills_attendee_name_part_columns_on_legacy_table(event, order)
     client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
     legacy_columns = [
         spec
-        for spec in TICKETS_COLUMNS
+        for spec in PARTICIPANTS_COLUMNS
         if spec["column_name"] not in {"attendee_given_name", "attendee_family_name"}
     ]
-    client.create_table(base["id"], title=TABLE_TICKETS, columns=legacy_columns)
+    client.create_table(base["id"], title=TABLE_PARTICIPANTS, columns=legacy_columns)
 
     service = NocoDBSyncService(event, client=client)
     service.config.base_id = base["id"]
     service.sync_order(order)
 
-    updated_tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    updated_participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
-    column_names = {column["column_name"] for column in updated_tickets_table["columns"]}
+    column_names = {column["column_name"] for column in updated_participants_table["columns"]}
     assert {"attendee_given_name", "attendee_family_name"} <= column_names
 
-    ticket_row = client.records[updated_tickets_table["id"]][0]
+    ticket_row = client.records[updated_participants_table["id"]][0]
     assert ticket_row["attendee_given_name"] == "Ada"
     assert ticket_row["attendee_family_name"] == "Lovelace"
 
@@ -856,7 +867,7 @@ def test_sync_upgrades_status_and_currency_to_single_select(event, order):
     client = FakeNocoDBClient()
     base = client.create_base("pretix")
     client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
-    client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    client.create_table(base["id"], title=TABLE_PARTICIPANTS, columns=PARTICIPANTS_COLUMNS)
 
     service = NocoDBSyncService(event, client=client)
     service.config.base_id = base["id"]
@@ -865,8 +876,8 @@ def test_sync_upgrades_status_and_currency_to_single_select(event, order):
     orders_table = next(
         table for table in client.tables.values() if table["title"] == TABLE_ORDERS
     )
-    tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
 
     status_column = next(
@@ -887,7 +898,7 @@ def test_sync_upgrades_status_and_currency_to_single_select(event, order):
 
     order_status_column = next(
         column
-        for column in tickets_table["columns"]
+        for column in participants_table["columns"]
         if column.get("column_name") == "order_status"
     )
     assert order_status_column["uidt"] == "SingleSelect"
@@ -899,7 +910,7 @@ def test_sync_upgrades_status_and_currency_to_single_select(event, order):
     order_row = client.records[orders_table["id"]][0]
     assert order_row["Status"] == "pending"
     assert order_row["Currency"] == str(event.currency)
-    ticket_row = client.records[tickets_table["id"]][0]
+    ticket_row = client.records[participants_table["id"]][0]
     assert ticket_row["Order status"] == "pending"
 
 
@@ -913,28 +924,30 @@ def test_sync_promotes_attendee_name_as_primary_value(event, order):
     base = client.create_base("pretix")
     client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
     legacy_tickets_columns = []
-    for spec in TICKETS_COLUMNS:
+    for spec in PARTICIPANTS_COLUMNS:
         adjusted = dict(spec)
-        if adjusted["column_name"] == TICKET_KEY_FIELD:
+        if adjusted["column_name"] == PARTICIPANT_KEY_FIELD:
             adjusted["pv"] = True
         elif adjusted["column_name"] == "attendee_name":
             adjusted.pop("pv", None)
         legacy_tickets_columns.append(adjusted)
-    client.create_table(base["id"], title=TABLE_TICKETS, columns=legacy_tickets_columns)
+    client.create_table(base["id"], title=TABLE_PARTICIPANTS, columns=legacy_tickets_columns)
 
     service = NocoDBSyncService(event, client=client)
     service.config.base_id = base["id"]
     service.sync_order(order)
 
-    updated_tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    updated_participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
-    primary_columns = [column for column in updated_tickets_table["columns"] if column.get("pv")]
+    primary_columns = [
+        column for column in updated_participants_table["columns"] if column.get("pv")
+    ]
     assert len(primary_columns) == 1
     assert primary_columns[0]["column_name"] == "attendee_name"
 
 
-def test_sync_links_orphan_ticket_rows_without_duplicating(event, order):
+def test_sync_links_orphan_participant_rows_without_duplicating(event, order):
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
     position = OrderPosition.objects.create(
         order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
@@ -943,44 +956,52 @@ def test_sync_links_orphan_ticket_rows_without_duplicating(event, order):
     client = FakeNocoDBClient()
     base = client.create_base("pretix")
     orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
-    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    participants_table = client.create_table(
+        base["id"],
+        title=TABLE_PARTICIPANTS,
+        columns=PARTICIPANTS_COLUMNS,
+    )
     client.create_link_column(
-        tickets_table["id"],
+        participants_table["id"],
         title=ORDER_LINK_FIELD,
         child_id=orders_table["id"],
-        parent_id=tickets_table["id"],
+        parent_id=participants_table["id"],
     )
     order_row_id = client.create_records(
         orders_table["id"], [{ORDER_KEY_FIELD: str(order.code)}],
     )[0]["Id"]
-    # Orphan: ticket exists with the right position id but no link
+    # Orphan: participant exists with the right position id but no link
     orphan_id = client.create_records(
-        tickets_table["id"], [{TICKET_KEY_FIELD: position.pk}],
+        participants_table["id"], [{PARTICIPANT_KEY_FIELD: position.pk}],
     )[0]["Id"]
 
     service = NocoDBSyncService(event, client=client)
     service.config.base_id = base["id"]
     service.sync_order(order)
 
-    updated_tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    updated_participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
-    rows = [r for r in client.records[updated_tickets_table["id"]] if r.get(TICKET_KEY_FIELD)]
+    rows = [
+        row
+        for row in client.records[updated_participants_table["id"]]
+        if row.get(PARTICIPANT_KEY_FIELD)
+    ]
     assert len(rows) == 1
     assert rows[0]["Id"] == orphan_id
 
     link_col = next(
         column
-        for column in updated_tickets_table["columns"]
+        for column in updated_participants_table["columns"]
         if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
     )
     linked = client.list_linked_records(
-        updated_tickets_table["id"], link_col["id"], orphan_id,
+        updated_participants_table["id"], link_col["id"], orphan_id,
     )
     assert [row["Id"] for row in linked] == [order_row_id]
 
 
-def test_sync_deletes_duplicate_ticket_rows(event, order):
+def test_sync_deletes_duplicate_participant_rows(event, order):
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
     position = OrderPosition.objects.create(
         order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
@@ -989,37 +1010,41 @@ def test_sync_deletes_duplicate_ticket_rows(event, order):
     client = FakeNocoDBClient()
     base = client.create_base("pretix")
     orders_table = client.create_table(base["id"], title=TABLE_ORDERS, columns=ORDERS_COLUMNS)
-    tickets_table = client.create_table(base["id"], title=TABLE_TICKETS, columns=TICKETS_COLUMNS)
+    participants_table = client.create_table(
+        base["id"],
+        title=TABLE_PARTICIPANTS,
+        columns=PARTICIPANTS_COLUMNS,
+    )
     client.create_link_column(
-        tickets_table["id"],
+        participants_table["id"],
         title=ORDER_LINK_FIELD,
         child_id=orders_table["id"],
-        parent_id=tickets_table["id"],
+        parent_id=participants_table["id"],
     )
     order_row_id = client.create_records(
         orders_table["id"], [{ORDER_KEY_FIELD: str(order.code)}],
     )[0]["Id"]
     first_id = client.create_records(
-        tickets_table["id"], [{TICKET_KEY_FIELD: position.pk}],
+        participants_table["id"], [{PARTICIPANT_KEY_FIELD: position.pk}],
     )[0]["Id"]
     second_id = client.create_records(
-        tickets_table["id"], [{TICKET_KEY_FIELD: position.pk}],
+        participants_table["id"], [{PARTICIPANT_KEY_FIELD: position.pk}],
     )[0]["Id"]
     link_col = next(
         column
-        for column in client.tables[tickets_table["id"]]["columns"]
+        for column in client.tables[participants_table["id"]]["columns"]
         if column.get("uidt") == "Links" and column.get("title") == ORDER_LINK_FIELD
     )
-    client.link_records(tickets_table["id"], link_col["id"], second_id, order_row_id)
+    client.link_records(participants_table["id"], link_col["id"], second_id, order_row_id)
 
     service = NocoDBSyncService(event, client=client)
     service.config.base_id = base["id"]
     service.sync_order(order)
 
-    updated_tickets_table = next(
-        table for table in client.tables.values() if table["title"] == TABLE_TICKETS
+    updated_participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
     )
-    rows = client.records[updated_tickets_table["id"]]
+    rows = client.records[updated_participants_table["id"]]
     assert len(rows) == 1
     # The linked row is preferred over the orphan during dedup.
     assert rows[0]["Id"] == second_id
@@ -1050,5 +1075,5 @@ def test_sync_uses_stable_tables(event):
     assert schema is not None
     assert {table["title"] for table in client.tables.values()} == {
         TABLE_ORDERS,
-        TABLE_TICKETS,
+        TABLE_PARTICIPANTS,
     }

@@ -13,7 +13,7 @@ _DEFAULTS = {
     "plugin_nocodb_workspace_id": ("", str),
     "plugin_nocodb_base_id": ("", str),
     "plugin_nocodb_orders_table_id": ("", str),
-    "plugin_nocodb_tickets_table_id": ("", str),
+    "plugin_nocodb_participants_table_id": ("", str),
     "plugin_nocodb_questions_table_id": ("", str),
 }
 
@@ -35,7 +35,7 @@ class NocoDBConfig:
     workspace_id: str
     base_id: str
     orders_table_id: str
-    tickets_table_id: str
+    participants_table_id: str
     questions_table_id: str
 
     @classmethod
@@ -48,7 +48,7 @@ class NocoDBConfig:
             workspace_id=settings.get("workspace_id", default=""),
             base_id=settings.get("base_id", default=""),
             orders_table_id=settings.get("orders_table_id", default=""),
-            tickets_table_id=settings.get("tickets_table_id", default=""),
+            participants_table_id=settings.get("participants_table_id", default=""),
             questions_table_id=settings.get("questions_table_id", default=""),
         )
 

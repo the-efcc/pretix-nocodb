@@ -14,12 +14,12 @@ from pretix.base.models import Order, OrderPayment, Question, QuestionAnswer
 from .client import NocoDBAPIError, NocoDBClient
 from .plugin_settings import NocoDBConfig, settings_for_event
 
-TABLE_ORDERS = "orders"
-TABLE_TICKETS = "tickets"
+TABLE_ORDERS = "Orders"
+TABLE_PARTICIPANTS = "Participants"
 MAX_COLUMN_TITLE_LENGTH = 255
 
 ORDER_KEY_FIELD = "pretix_order_code"
-TICKET_KEY_FIELD = "pretix_position_id"
+PARTICIPANT_KEY_FIELD = "pretix_position_id"
 ORDER_LINK_FIELD = "Order"
 SELECT_OPTION_COLOR = "#1f3a5f"
 STATUS_OPTIONS = ["pending", "paid", "expired", "canceled"]
@@ -67,8 +67,8 @@ ORDERS_COLUMNS = [
     _column("raw_json", "JSON"),
 ]
 
-TICKETS_COLUMNS = [
-    _column(TICKET_KEY_FIELD, "Number", rqd=True),
+PARTICIPANTS_COLUMNS = [
+    _column(PARTICIPANT_KEY_FIELD, "Number", rqd=True),
     _column("order_status", "SingleLineText"),
     _column("positionid", "Number"),
     _column("pretix_item_id", "Number"),
@@ -101,7 +101,7 @@ class TableState:
 @dataclass(slots=True)
 class SchemaState:
     orders_table_id: str
-    tickets_table_id: str
+    participants_table_id: str
     order_link_column_id: str
     order_reciprocal_link_column_id: str
     question_columns: dict[str, str]
@@ -130,15 +130,15 @@ class NocoDBSyncService:
         table_ids = self._ensure_tables(base_id)
 
         orders_table = self._fetch_table_state(table_ids[TABLE_ORDERS])
-        tickets_table = self._fetch_table_state(table_ids[TABLE_TICKETS])
+        participants_table = self._fetch_table_state(table_ids[TABLE_PARTICIPANTS])
         (
             order_link_column_id,
             order_reciprocal_link_column_id,
             orders_table,
-            tickets_table,
-        ) = self._ensure_order_link_column(orders_table, tickets_table)
-        tickets_table = self._delete_ticket_column(tickets_table, "order_code")
-        tickets_table = self._ensure_static_columns(tickets_table, TICKETS_COLUMNS)
+            participants_table,
+        ) = self._ensure_order_link_column(orders_table, participants_table)
+        participants_table = self._delete_participant_column(participants_table, "order_code")
+        participants_table = self._ensure_static_columns(participants_table, PARTICIPANTS_COLUMNS)
 
         questions = list(
             self.event.questions.prefetch_related("items", "options").order_by("position", "pk")
@@ -150,28 +150,28 @@ class NocoDBSyncService:
             question_identifier = str(question.identifier)
             column_name = self._question_column_name(question.identifier)
             question_title = question_titles[question_identifier]
-            column = tickets_table.columns_by_name.get(column_name)
+            column = participants_table.columns_by_name.get(column_name)
             if not column:
                 column = self._create_question_column(
-                    tickets_table.id,
+                    participants_table.id,
                     question,
                     title=question_title,
                 )
-                self._upsert_table_state_column(tickets_table, column)
+                self._upsert_table_state_column(participants_table, column)
             elif self._question_column_needs_update(column, question_title, question):
                 column = self._update_question_column(column, question, title=question_title)
-                self._upsert_table_state_column(tickets_table, column)
+                self._upsert_table_state_column(participants_table, column)
             question_columns[question_identifier] = column["title"]
 
         item_names, variation_names = self._collect_item_options()
-        tickets_table = self._ensure_select_column(
-            tickets_table, "item_name", "Item name", item_names,
+        participants_table = self._ensure_select_column(
+            participants_table, "item_name", "Item name", item_names,
         )
-        tickets_table = self._ensure_select_column(
-            tickets_table, "variation_name", "Variation name", variation_names,
+        participants_table = self._ensure_select_column(
+            participants_table, "variation_name", "Variation name", variation_names,
         )
-        tickets_table = self._ensure_select_column(
-            tickets_table, "order_status", "Order status", STATUS_OPTIONS,
+        participants_table = self._ensure_select_column(
+            participants_table, "order_status", "Order status", STATUS_OPTIONS,
         )
 
         orders_table = self._ensure_select_column(
@@ -181,11 +181,11 @@ class NocoDBSyncService:
             orders_table, "currency", "Currency", [str(self.event.currency)],
         )
 
-        tickets_table = self._ensure_primary_value(tickets_table, "attendee_name")
+        participants_table = self._ensure_primary_value(participants_table, "attendee_name")
 
         return SchemaState(
             orders_table_id=orders_table.id,
-            tickets_table_id=tickets_table.id,
+            participants_table_id=participants_table.id,
             order_link_column_id=order_link_column_id,
             order_reciprocal_link_column_id=order_reciprocal_link_column_id,
             question_columns=question_columns,
@@ -197,7 +197,7 @@ class NocoDBSyncService:
             return
 
         order_row_id = self._upsert_order(schema.orders_table_id, order)
-        self._upsert_tickets(schema, order, order_row_id)
+        self._upsert_participants(schema, order, order_row_id)
 
     def _ensure_base(self) -> str:
         return self.config.base_id
@@ -207,7 +207,11 @@ class NocoDBSyncService:
         existing_tables = {table.get("title"): table for table in client.list_tables(base_id)}
         settings_map = {
             TABLE_ORDERS: (self.config.orders_table_id, ORDERS_COLUMNS, "orders_table_id"),
-            TABLE_TICKETS: (self.config.tickets_table_id, TICKETS_COLUMNS, "tickets_table_id"),
+            TABLE_PARTICIPANTS: (
+                self.config.participants_table_id,
+                PARTICIPANTS_COLUMNS,
+                "participants_table_id",
+            ),
         }
         table_ids: dict[str, str] = {}
 
@@ -361,7 +365,7 @@ class NocoDBSyncService:
     def _ensure_order_link_column(
         self,
         orders_table: TableState,
-        tickets_table: TableState,
+        participants_table: TableState,
     ) -> tuple[str, str, TableState, TableState]:
         def find_v2_link(table: TableState) -> dict[str, Any] | None:
             return next(
@@ -380,7 +384,7 @@ class NocoDBSyncService:
         legacy = next(
             (
                 candidate
-                for candidate in tickets_table.columns
+                for candidate in participants_table.columns
                 if candidate.get("uidt") == "LinkToAnotherRecord"
                 and candidate.get("colOptions", {}).get("fk_related_model_id") == orders_table.id
                 and candidate.get("title") == ORDER_LINK_FIELD
@@ -390,21 +394,21 @@ class NocoDBSyncService:
         if legacy is not None:
             client = self._get_client()
             client.delete_column(legacy["id"])
-            tickets_table = self._fetch_table_state(tickets_table.id)
+            participants_table = self._fetch_table_state(participants_table.id)
             orders_table = self._fetch_table_state(orders_table.id)
 
-        link_column = find_v2_link(tickets_table)
+        link_column = find_v2_link(participants_table)
         if link_column is None:
             client = self._get_client()
             client.create_link_column(
-                tickets_table.id,
+                participants_table.id,
                 title=ORDER_LINK_FIELD,
                 child_id=orders_table.id,
-                parent_id=tickets_table.id,
+                parent_id=participants_table.id,
             )
-            tickets_table = self._fetch_table_state(tickets_table.id)
+            participants_table = self._fetch_table_state(participants_table.id)
             orders_table = self._fetch_table_state(orders_table.id)
-            link_column = find_v2_link(tickets_table)
+            link_column = find_v2_link(participants_table)
             if link_column is None:
                 raise RuntimeError(f"Order link column {ORDER_LINK_FIELD} was not created")
 
@@ -416,7 +420,7 @@ class NocoDBSyncService:
                 if candidate.get("uidt") == "Links"
                 and candidate.get("colOptions", {}).get("type") == "om"
                 and candidate.get("colOptions", {}).get("fk_related_model_id")
-                == tickets_table.id
+                == participants_table.id
                 and candidate.get("colOptions", {}).get("fk_mm_model_id")
                 == link_col_options.get("fk_mm_model_id")
             ),
@@ -427,7 +431,7 @@ class NocoDBSyncService:
                 f"Reciprocal link column for {ORDER_LINK_FIELD} not found on orders table"
             )
 
-        return link_column["id"], reciprocal["id"], orders_table, tickets_table
+        return link_column["id"], reciprocal["id"], orders_table, participants_table
 
     def _collect_item_options(self) -> tuple[list[str], list[str]]:
         items = list(
@@ -505,14 +509,18 @@ class NocoDBSyncService:
         client.set_primary_column(column["id"])
         return self._fetch_table_state(table_state.id)
 
-    def _delete_ticket_column(self, tickets_table: TableState, column_name: str) -> TableState:
-        column = tickets_table.columns_by_name.get(column_name)
+    def _delete_participant_column(
+        self,
+        participants_table: TableState,
+        column_name: str,
+    ) -> TableState:
+        column = participants_table.columns_by_name.get(column_name)
         if column is None:
-            return tickets_table
+            return participants_table
 
         client = self._get_client()
         client.delete_column(column["id"])
-        return self._fetch_table_state(tickets_table.id)
+        return self._fetch_table_state(participants_table.id)
 
     def _upsert_table_state_column(self, table_state: TableState, column: dict[str, Any]) -> None:
         if column.get("id"):
@@ -546,7 +554,7 @@ class NocoDBSyncService:
         created = client.create_records(table_id, [payload])
         return int(created[0]["Id"])
 
-    def _upsert_tickets(self, schema: SchemaState, order: Order, order_row_id: int) -> None:
+    def _upsert_participants(self, schema: SchemaState, order: Order, order_row_id: int) -> None:
         client = self._get_client()
         order_obj = cast(Any, order)
 
@@ -562,27 +570,27 @@ class NocoDBSyncService:
             schema.orders_table_id,
             schema.order_reciprocal_link_column_id,
             order_row_id,
-            fields=["Id", TICKET_KEY_FIELD],
+            fields=["Id", PARTICIPANT_KEY_FIELD],
             limit=1000,
         )
         linked_ids: set[int] = {int(row["Id"]) for row in linked_rows}
 
         row_position_pk: dict[int, int | None] = {}
         for row in linked_rows:
-            pk_val = row.get(TICKET_KEY_FIELD)
+            pk_val = row.get(PARTICIPANT_KEY_FIELD)
             row_position_pk[int(row["Id"])] = int(pk_val) if pk_val is not None else None
 
-        # Also pull any tickets keyed by the current positions; that catches
+        # Also pull any participants keyed by the current positions; that catches
         # orphan rows whose order link was lost (e.g. legacy column migration)
         # plus duplicate rows that a previous broken sync created.
         if position_pks:
             for row in client.list_records(
-                schema.tickets_table_id,
-                where=self._where_in(TICKET_KEY_FIELD, position_pks),
-                fields=["Id", TICKET_KEY_FIELD],
+                schema.participants_table_id,
+                where=self._where_in(PARTICIPANT_KEY_FIELD, position_pks),
+                fields=["Id", PARTICIPANT_KEY_FIELD],
                 limit=max(len(position_pks) * 4, 200),
             ):
-                pk_val = row.get(TICKET_KEY_FIELD)
+                pk_val = row.get(PARTICIPANT_KEY_FIELD)
                 if pk_val is None:
                     continue
                 row_position_pk.setdefault(int(row["Id"]), int(pk_val))
@@ -606,14 +614,14 @@ class NocoDBSyncService:
 
         if duplicate_row_ids:
             client.delete_records(
-                schema.tickets_table_id,
+                schema.participants_table_id,
                 [{"Id": row_id} for row_id in duplicate_row_ids],
             )
 
         creates: list[tuple[int, dict[str, Any]]] = []
         updates: list[dict[str, Any]] = []
         for position in positions:
-            payload = self._ticket_payload(schema, order, position)
+            payload = self._participant_payload(schema, order, position)
             existing_id = canonical.get(position.pk)
             if existing_id is not None:
                 payload["Id"] = existing_id
@@ -623,23 +631,23 @@ class NocoDBSyncService:
 
         if creates:
             created = client.create_records(
-                schema.tickets_table_id, [payload for _, payload in creates]
+                schema.participants_table_id, [payload for _, payload in creates]
             )
             for (_, _), created_row in zip(creates, created, strict=True):
                 client.link_records(
-                    schema.tickets_table_id,
+                    schema.participants_table_id,
                     schema.order_link_column_id,
                     int(created_row["Id"]),
                     order_row_id,
                 )
 
         if updates:
-            client.update_records(schema.tickets_table_id, updates)
+            client.update_records(schema.participants_table_id, updates)
 
         for row_id in canonical.values():
             if row_id not in linked_ids:
                 client.link_records(
-                    schema.tickets_table_id,
+                    schema.participants_table_id,
                     schema.order_link_column_id,
                     row_id,
                     order_row_id,
@@ -647,7 +655,7 @@ class NocoDBSyncService:
 
         if stale_ids:
             client.delete_records(
-                schema.tickets_table_id, [{"Id": row_id} for row_id in stale_ids]
+                schema.participants_table_id, [{"Id": row_id} for row_id in stale_ids]
             )
 
     def _order_payload(self, order: Order) -> dict[str, Any]:
@@ -692,7 +700,7 @@ class NocoDBSyncService:
             },
         }
 
-    def _ticket_payload(
+    def _participant_payload(
         self,
         schema: SchemaState,
         order: Order,
@@ -716,7 +724,7 @@ class NocoDBSyncService:
         name_parts = position_obj.attendee_name_parts or {}
 
         return {
-            TICKET_KEY_FIELD: position_obj.pk,
+            PARTICIPANT_KEY_FIELD: position_obj.pk,
             "order_status": self._status_label(order_obj.status),
             "positionid": position_obj.positionid,
             "pretix_item_id": position_obj.item_id,
