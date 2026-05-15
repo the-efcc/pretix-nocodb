@@ -211,9 +211,12 @@ class NocoDBClient:
         *,
         where: str | None = None,
         fields: list[str] | None = None,
+        offset: int = 0,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"limit": limit}
+        if offset:
+            params["offset"] = offset
         if where:
             params["where"] = where
         if fields:

@@ -23,6 +23,7 @@ PARTICIPANT_KEY_FIELD = "pretix_position_id"
 ORDER_LINK_FIELD = "Order"
 SELECT_OPTION_COLOR = "#1f3a5f"
 STATUS_OPTIONS = ["pending", "paid", "expired", "canceled"]
+RECORD_PAGE_SIZE = 200
 
 
 def _column(
@@ -206,6 +207,76 @@ class NocoDBSyncService:
 
         order_row_id = self._upsert_order(schema.orders_table_id, order)
         self._upsert_participants(schema, order, order_row_id)
+
+    def delete_order(self, order_code: str, *, position_ids: list[int] | None = None) -> None:
+        if not self.config.can_sync or self.client is None:
+            return
+
+        participant_ids: set[int] = set()
+        unique_positions = sorted({int(position_id) for position_id in position_ids or []})
+        if self.config.participants_table_id and unique_positions:
+            for start in range(0, len(unique_positions), 100):
+                batch = unique_positions[start : start + 100]
+                for row in self._list_all_records(
+                    self.config.participants_table_id,
+                    fields=["Id", PARTICIPANT_KEY_FIELD],
+                    where=self._where_in(PARTICIPANT_KEY_FIELD, batch),
+                ):
+                    row_id = row.get("Id")
+                    if row_id is not None:
+                        participant_ids.add(int(row_id))
+
+        order_ids: list[int] = []
+        if self.config.orders_table_id:
+            for row in self._list_all_records(
+                self.config.orders_table_id,
+                fields=["Id", ORDER_KEY_FIELD],
+                where=self._where_equals(ORDER_KEY_FIELD, order_code),
+            ):
+                row_id = row.get("Id")
+                if row_id is not None:
+                    order_ids.append(int(row_id))
+
+        self._delete_record_ids(self.config.participants_table_id, list(participant_ids))
+        self._delete_record_ids(self.config.orders_table_id, order_ids)
+
+    def prune_deleted_rows(
+        self,
+        *,
+        active_order_codes: set[str],
+        active_position_ids: set[int],
+    ) -> None:
+        if not self.config.can_sync or self.client is None:
+            return
+
+        stale_order_ids: list[int] = []
+        if self.config.orders_table_id:
+            for row in self._list_all_records(
+                self.config.orders_table_id,
+                fields=["Id", ORDER_KEY_FIELD],
+            ):
+                order_code = row.get(ORDER_KEY_FIELD)
+                if order_code is None or str(order_code) in active_order_codes:
+                    continue
+                row_id = row.get("Id")
+                if row_id is not None:
+                    stale_order_ids.append(int(row_id))
+
+        stale_participant_ids: list[int] = []
+        if self.config.participants_table_id:
+            for row in self._list_all_records(
+                self.config.participants_table_id,
+                fields=["Id", PARTICIPANT_KEY_FIELD],
+            ):
+                position_id = row.get(PARTICIPANT_KEY_FIELD)
+                if position_id is None or int(position_id) in active_position_ids:
+                    continue
+                row_id = row.get("Id")
+                if row_id is not None:
+                    stale_participant_ids.append(int(row_id))
+
+        self._delete_record_ids(self.config.participants_table_id, stale_participant_ids)
+        self._delete_record_ids(self.config.orders_table_id, stale_order_ids)
 
     def _ensure_base(self) -> str:
         return self.config.base_id
@@ -572,6 +643,39 @@ class NocoDBSyncService:
             table_state.columns_by_name[column["column_name"]] = column
         if column.get("title"):
             table_state.columns_by_title[column["title"]] = column
+
+    def _list_all_records(
+        self,
+        table_id: str,
+        *,
+        fields: list[str] | None = None,
+        where: str | None = None,
+    ) -> list[dict[str, Any]]:
+        client = self._get_client()
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            batch = client.list_records(
+                table_id,
+                where=where,
+                fields=fields,
+                offset=offset,
+                limit=RECORD_PAGE_SIZE,
+            )
+            rows.extend(batch)
+            if len(batch) < RECORD_PAGE_SIZE:
+                return rows
+            offset += len(batch)
+
+    def _delete_record_ids(self, table_id: str, record_ids: list[int]) -> None:
+        if not table_id or not record_ids:
+            return
+
+        client = self._get_client()
+        unique_ids = sorted({int(record_id) for record_id in record_ids})
+        for start in range(0, len(unique_ids), RECORD_PAGE_SIZE):
+            batch = unique_ids[start : start + RECORD_PAGE_SIZE]
+            client.delete_records(table_id, [{"Id": record_id} for record_id in batch])
 
     def _upsert_order(self, table_id: str, order: Order) -> int:
         client = self._get_client()

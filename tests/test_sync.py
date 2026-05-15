@@ -7,6 +7,7 @@ import pytest
 from pretix.base.models import (
     Item,
     ItemVariation,
+    Order,
     OrderPosition,
     Question,
     QuestionAnswer,
@@ -296,6 +297,7 @@ class FakeNocoDBClient:
         *,
         where: str | None = None,
         fields=None,
+        offset: int = 0,
         limit: int = 200,
     ):
         records = list(self.records[table_id])
@@ -324,7 +326,7 @@ class FakeNocoDBClient:
                 }
                 for record in records
             ]
-        return records[:limit]
+        return records[offset : offset + limit]
 
     def create_records(self, table_id: str, records: list[dict]):
         aliases = self._column_aliases(table_id)
@@ -1087,6 +1089,79 @@ def test_sync_deletes_duplicate_participant_rows(event, order):
     # The linked row is preferred over the orphan during dedup.
     assert rows[0]["Id"] == second_id
     assert first_id not in {row["Id"] for row in rows}
+
+
+def test_delete_order_removes_order_and_participant_rows(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    first_position = OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
+    )
+    second_position = OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Grace",
+    )
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    service.sync_order(order)
+
+    service.delete_order(
+        str(order.code),
+        position_ids=[first_position.pk, second_position.pk],
+    )
+
+    orders_table = next(table for table in client.tables.values() if table["title"] == TABLE_ORDERS)
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    assert client.records[orders_table["id"]] == []
+    assert client.records[participants_table["id"]] == []
+
+
+def test_prune_deleted_rows_removes_stale_orders_and_participants(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    current_position = OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
+    )
+    stale_order = Order.objects.create(
+        code="STALE1",
+        event=event,
+        email="stale@example.org",
+        status=Order.STATUS_PENDING,
+        datetime=order.datetime,
+        expires=order.expires,
+        total=Decimal("10.00"),
+        sales_channel=order.sales_channel,
+    )
+    stale_position = OrderPosition.objects.create(
+        order=stale_order,
+        item=item,
+        price=Decimal("10"),
+        attendee_name_cached="Grace",
+    )
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    service.sync_order(order)
+    service.sync_order(stale_order)
+
+    service.prune_deleted_rows(
+        active_order_codes={str(order.code)},
+        active_position_ids={current_position.pk},
+    )
+
+    orders_table = next(table for table in client.tables.values() if table["title"] == TABLE_ORDERS)
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    assert [row[ORDER_KEY_FIELD] for row in client.records[orders_table["id"]]] == [str(order.code)]
+    assert [
+        row[PARTICIPANT_KEY_FIELD] for row in client.records[participants_table["id"]]
+    ] == [current_position.pk]
+    assert stale_position.pk not in {
+        row[PARTICIPANT_KEY_FIELD] for row in client.records[participants_table["id"]]
+    }
 
 
 def test_sync_skips_when_base_id_missing(event, order):

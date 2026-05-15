@@ -17,6 +17,7 @@ from pretix.base.signals import (
     order_denied,
     order_expired,
     order_expiry_changed,
+    order_gracefully_delete,
     order_modified,
     order_paid,
     order_placed,
@@ -25,7 +26,7 @@ from pretix.base.signals import (
 from pretix.control.signals import nav_event_settings
 
 from .plugin_settings import NocoDBConfig
-from .tasks import sync_event_schema, sync_order_to_nocodb
+from .tasks import delete_order_from_nocodb, sync_event_schema, sync_order_to_nocodb
 
 QUESTION_ITEMS_THROUGH = cast(Any, Question.items).through
 
@@ -50,6 +51,23 @@ def _enqueue_order_sync(order) -> None:
     )
 
 
+def _enqueue_order_delete(order) -> None:
+    if not _event_is_sync_enabled(order.event):
+        return
+
+    order_obj = cast(Any, order)
+    position_ids = list(order_obj.all_positions.values_list("pk", flat=True))
+    transaction.on_commit(
+        lambda: delete_order_from_nocodb.apply_async(
+            kwargs={
+                "event": order.event.pk,
+                "order_code": str(order_obj.code),
+                "position_ids": position_ids,
+            }
+        )
+    )
+
+
 @receiver(order_placed, dispatch_uid="nocodb_order_placed")
 @receiver(order_paid, dispatch_uid="nocodb_order_paid")
 @receiver(order_canceled, dispatch_uid="nocodb_order_canceled")
@@ -68,6 +86,11 @@ def sync_order_on_change(sender, order, **kwargs) -> None:
 @receiver(checkin_annulled, dispatch_uid="nocodb_checkin_annulled")
 def sync_order_on_checkin(sender, checkin, **kwargs) -> None:
     _enqueue_order_sync(checkin.position.order)
+
+
+@receiver(order_gracefully_delete, dispatch_uid="nocodb_order_gracefully_delete")
+def delete_order_on_graceful_delete(sender, order, **kwargs) -> None:
+    _enqueue_order_delete(order)
 
 
 @receiver(post_save, sender=Question, dispatch_uid="nocodb_question_saved")
