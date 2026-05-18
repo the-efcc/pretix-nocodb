@@ -39,7 +39,4 @@ def sync_all_orders_to_nocodb(event) -> None:
         )
     for order in orders:
         service.sync_order(order)
-    service.prune_deleted_rows(
-        active_order_codes={str(order.code) for order in orders},
-        active_position_ids=position_ids,
-    )
+    service.prune_deleted_rows(active_position_ids=position_ids)

@@ -5,22 +5,19 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
-from django.db.models import Max
 from django.utils.timezone import is_naive, make_naive
 from django_countries import countries
 from i18nfield.strings import LazyI18nString
-from pretix.base.models import Order, OrderPayment, Question, QuestionAnswer
+from pretix.base.models import Order, Question, QuestionAnswer
 
 from .client import NocoDBAPIError, NocoDBClient
 from .plugin_settings import NocoDBConfig, settings_for_event
 
-TABLE_ORDERS = "Orders"
 TABLE_PARTICIPANTS = "Participants"
 MAX_COLUMN_TITLE_LENGTH = 255
 
-ORDER_KEY_FIELD = "pretix_order_code"
 PARTICIPANT_KEY_FIELD = "pretix_position_id"
-ORDER_LINK_FIELD = "Order"
+ORDER_CODE_FIELD = "pretix_order_code"
 SELECT_OPTION_COLOR = "#1f3a5f"
 STATUS_OPTIONS = ["pending", "paid", "expired", "canceled"]
 RECORD_PAGE_SIZE = 200
@@ -49,27 +46,9 @@ def _column(
     return payload
 
 
-ORDERS_COLUMNS = [
-    _column(ORDER_KEY_FIELD, "SingleLineText", pv=True, rqd=True),
-    _column("status", "SingleLineText"),
-    _column("email", "Email"),
-    _column("phone", "PhoneNumber"),
-    _column("locale", "SingleLineText"),
-    _column("sales_channel", "SingleLineText"),
-    _column("datetime", "DateTime"),
-    _column("expires", "DateTime"),
-    _column("payment_date", "DateTime"),
-    _column("cancellation_date", "DateTime"),
-    _column("total", "Decimal"),
-    _column("currency", "SingleLineText"),
-    _column("testmode", "Checkbox"),
-    _column("valid_if_pending", "Checkbox"),
-    _column("require_approval", "Checkbox"),
-    _column("raw_json", "JSON"),
-]
-
 PARTICIPANTS_COLUMNS = [
     _column(PARTICIPANT_KEY_FIELD, "Number", rqd=True),
+    _column(ORDER_CODE_FIELD, "SingleLineText"),
     _column("order_status", "SingleLineText"),
     _column("positionid", "Number"),
     _column("pretix_item_id", "Number"),
@@ -101,10 +80,7 @@ class TableState:
 
 @dataclass(slots=True)
 class SchemaState:
-    orders_table_id: str
     participants_table_id: str
-    order_link_column_id: str
-    order_reciprocal_link_column_id: str
     question_columns: dict[str, str]
 
 
@@ -128,17 +104,8 @@ class NocoDBSyncService:
             return None
 
         base_id = self._ensure_base()
-        table_ids = self._ensure_tables(base_id)
-
-        orders_table = self._fetch_table_state(table_ids[TABLE_ORDERS])
-        participants_table = self._fetch_table_state(table_ids[TABLE_PARTICIPANTS])
-        (
-            order_link_column_id,
-            order_reciprocal_link_column_id,
-            orders_table,
-            participants_table,
-        ) = self._ensure_order_link_column(orders_table, participants_table)
-        participants_table = self._delete_participant_column(participants_table, "order_code")
+        participants_table_id = self._ensure_participants_table(base_id)
+        participants_table = self._fetch_table_state(participants_table_id)
         participants_table = self._ensure_static_columns(participants_table, PARTICIPANTS_COLUMNS)
 
         questions = list(
@@ -175,16 +142,8 @@ class NocoDBSyncService:
             participants_table, "order_status", "Order status", STATUS_OPTIONS,
         )
 
-        orders_table = self._ensure_select_column(
-            orders_table, "status", "Status", STATUS_OPTIONS,
-        )
-        orders_table = self._ensure_select_column(
-            orders_table, "currency", "Currency", [str(self.event.currency)],
-        )
-
         participants_table = self._ensure_primary_value(participants_table, "attendee_name")
 
-        self._ensure_view_title(orders_table.id, "All")
         participants_view_id = self._ensure_view_title(participants_table.id, "All")
         if participants_view_id and not self._participants_view_defaults_applied(
             participants_view_id,
@@ -193,10 +152,7 @@ class NocoDBSyncService:
             self._persist_setting("participants_view_defaults_view_id", participants_view_id)
 
         return SchemaState(
-            orders_table_id=orders_table.id,
             participants_table_id=participants_table.id,
-            order_link_column_id=order_link_column_id,
-            order_reciprocal_link_column_id=order_reciprocal_link_column_id,
             question_columns=question_columns,
         )
 
@@ -205,16 +161,17 @@ class NocoDBSyncService:
         if schema is None:
             return
 
-        order_row_id = self._upsert_order(schema.orders_table_id, order)
-        self._upsert_participants(schema, order, order_row_id)
+        self._upsert_participants(schema, order)
 
     def delete_order(self, order_code: str, *, position_ids: list[int] | None = None) -> None:
         if not self.config.can_sync or self.client is None:
             return
+        if not self.config.participants_table_id:
+            return
 
         participant_ids: set[int] = set()
         unique_positions = sorted({int(position_id) for position_id in position_ids or []})
-        if self.config.participants_table_id and unique_positions:
+        if unique_positions:
             for start in range(0, len(unique_positions), 100):
                 batch = unique_positions[start : start + 100]
                 for row in self._list_all_records(
@@ -226,96 +183,67 @@ class NocoDBSyncService:
                     if row_id is not None:
                         participant_ids.add(int(row_id))
 
-        order_ids: list[int] = []
-        if self.config.orders_table_id:
-            for row in self._list_all_records(
-                self.config.orders_table_id,
-                fields=["Id", ORDER_KEY_FIELD],
-                where=self._where_equals(ORDER_KEY_FIELD, order_code),
-            ):
-                row_id = row.get("Id")
-                if row_id is not None:
-                    order_ids.append(int(row_id))
+        # Fall back to the order code so stray rows linked to the deleted order
+        # are removed even if their position id wasn't supplied.
+        for row in self._list_all_records(
+            self.config.participants_table_id,
+            fields=["Id", ORDER_CODE_FIELD],
+            where=self._where_equals(ORDER_CODE_FIELD, order_code),
+        ):
+            row_id = row.get("Id")
+            if row_id is not None:
+                participant_ids.add(int(row_id))
 
         self._delete_record_ids(self.config.participants_table_id, list(participant_ids))
-        self._delete_record_ids(self.config.orders_table_id, order_ids)
 
-    def prune_deleted_rows(
-        self,
-        *,
-        active_order_codes: set[str],
-        active_position_ids: set[int],
-    ) -> None:
+    def prune_deleted_rows(self, *, active_position_ids: set[int]) -> None:
         if not self.config.can_sync or self.client is None:
             return
-
-        stale_order_ids: list[int] = []
-        if self.config.orders_table_id:
-            for row in self._list_all_records(
-                self.config.orders_table_id,
-                fields=["Id", ORDER_KEY_FIELD],
-            ):
-                order_code = row.get(ORDER_KEY_FIELD)
-                if order_code is None or str(order_code) in active_order_codes:
-                    continue
-                row_id = row.get("Id")
-                if row_id is not None:
-                    stale_order_ids.append(int(row_id))
+        if not self.config.participants_table_id:
+            return
 
         stale_participant_ids: list[int] = []
-        if self.config.participants_table_id:
-            for row in self._list_all_records(
-                self.config.participants_table_id,
-                fields=["Id", PARTICIPANT_KEY_FIELD],
-            ):
-                position_id = row.get(PARTICIPANT_KEY_FIELD)
-                if position_id is None or int(position_id) in active_position_ids:
-                    continue
-                row_id = row.get("Id")
-                if row_id is not None:
-                    stale_participant_ids.append(int(row_id))
+        for row in self._list_all_records(
+            self.config.participants_table_id,
+            fields=["Id", PARTICIPANT_KEY_FIELD],
+        ):
+            position_id = row.get(PARTICIPANT_KEY_FIELD)
+            if position_id is None or int(position_id) in active_position_ids:
+                continue
+            row_id = row.get("Id")
+            if row_id is not None:
+                stale_participant_ids.append(int(row_id))
 
         self._delete_record_ids(self.config.participants_table_id, stale_participant_ids)
-        self._delete_record_ids(self.config.orders_table_id, stale_order_ids)
 
     def _ensure_base(self) -> str:
         return self.config.base_id
 
-    def _ensure_tables(self, base_id: str) -> dict[str, str]:
+    def _ensure_participants_table(self, base_id: str) -> str:
         client = self._get_client()
         existing_tables = {table.get("title"): table for table in client.list_tables(base_id)}
-        settings_map = {
-            TABLE_ORDERS: (self.config.orders_table_id, ORDERS_COLUMNS, "orders_table_id"),
-            TABLE_PARTICIPANTS: (
-                self.config.participants_table_id,
-                PARTICIPANTS_COLUMNS,
-                "participants_table_id",
-            ),
-        }
-        table_ids: dict[str, str] = {}
 
-        for title, (configured_id, columns, setting_key) in settings_map.items():
-            table_id = ""
-            if configured_id:
-                try:
-                    table = client.get_table(configured_id)
-                except NocoDBAPIError:
-                    table = None
-                else:
-                    table_id = table["id"]
-
-            if not table_id and title in existing_tables:
-                table_id = existing_tables[title]["id"]
-
-            if not table_id:
-                table = client.create_table(base_id, title=title, columns=columns)
+        table_id = ""
+        if self.config.participants_table_id:
+            try:
+                table = client.get_table(self.config.participants_table_id)
+            except NocoDBAPIError:
+                table = None
+            else:
                 table_id = table["id"]
 
-            self._persist_setting(setting_key, table_id)
-            setattr(self.config, setting_key, table_id)
-            table_ids[title] = table_id
+        if not table_id and TABLE_PARTICIPANTS in existing_tables:
+            table_id = existing_tables[TABLE_PARTICIPANTS]["id"]
 
-        return table_ids
+        if not table_id:
+            table = client.create_table(
+                base_id, title=TABLE_PARTICIPANTS, columns=PARTICIPANTS_COLUMNS
+            )
+            table_id = table["id"]
+
+        self._persist_setting("participants_table_id", table_id)
+        self.config.participants_table_id = table_id
+        return table_id
 
     def _fetch_table_state(self, table_id: str) -> TableState:
         client = self._get_client()
@@ -441,77 +369,6 @@ class NocoDBSyncService:
             if option.get("title")
         ]
 
-    def _ensure_order_link_column(
-        self,
-        orders_table: TableState,
-        participants_table: TableState,
-    ) -> tuple[str, str, TableState, TableState]:
-        def find_v2_link(table: TableState) -> dict[str, Any] | None:
-            return next(
-                (
-                    candidate
-                    for candidate in table.columns
-                    if candidate.get("uidt") == "Links"
-                    and candidate.get("colOptions", {}).get("type") == "mo"
-                    and candidate.get("colOptions", {}).get("fk_related_model_id")
-                    == orders_table.id
-                    and candidate.get("title") == ORDER_LINK_FIELD
-                ),
-                None,
-            )
-
-        legacy = next(
-            (
-                candidate
-                for candidate in participants_table.columns
-                if candidate.get("uidt") == "LinkToAnotherRecord"
-                and candidate.get("colOptions", {}).get("fk_related_model_id") == orders_table.id
-                and candidate.get("title") == ORDER_LINK_FIELD
-            ),
-            None,
-        )
-        if legacy is not None:
-            client = self._get_client()
-            client.delete_column(legacy["id"])
-            participants_table = self._fetch_table_state(participants_table.id)
-            orders_table = self._fetch_table_state(orders_table.id)
-
-        link_column = find_v2_link(participants_table)
-        if link_column is None:
-            client = self._get_client()
-            client.create_link_column(
-                participants_table.id,
-                title=ORDER_LINK_FIELD,
-                child_id=orders_table.id,
-                parent_id=participants_table.id,
-            )
-            participants_table = self._fetch_table_state(participants_table.id)
-            orders_table = self._fetch_table_state(orders_table.id)
-            link_column = find_v2_link(participants_table)
-            if link_column is None:
-                raise RuntimeError(f"Order link column {ORDER_LINK_FIELD} was not created")
-
-        link_col_options = link_column["colOptions"]
-        reciprocal = next(
-            (
-                candidate
-                for candidate in orders_table.columns
-                if candidate.get("uidt") == "Links"
-                and candidate.get("colOptions", {}).get("type") == "om"
-                and candidate.get("colOptions", {}).get("fk_related_model_id")
-                == participants_table.id
-                and candidate.get("colOptions", {}).get("fk_mm_model_id")
-                == link_col_options.get("fk_mm_model_id")
-            ),
-            None,
-        )
-        if reciprocal is None:
-            raise RuntimeError(
-                f"Reciprocal link column for {ORDER_LINK_FIELD} not found on orders table"
-            )
-
-        return link_column["id"], reciprocal["id"], orders_table, participants_table
-
     def _collect_item_options(self) -> tuple[list[str], list[str]]:
         items = list(
             cast(Any, self.event).items.prefetch_related("variations").order_by("position", "pk")
@@ -617,19 +474,6 @@ class NocoDBSyncService:
         client.set_primary_column(column["id"])
         return self._fetch_table_state(table_state.id)
 
-    def _delete_participant_column(
-        self,
-        participants_table: TableState,
-        column_name: str,
-    ) -> TableState:
-        column = participants_table.columns_by_name.get(column_name)
-        if column is None:
-            return participants_table
-
-        client = self._get_client()
-        client.delete_column(column["id"])
-        return self._fetch_table_state(participants_table.id)
-
     def _upsert_table_state_column(self, table_state: TableState, column: dict[str, Any]) -> None:
         if column.get("id"):
             table_state.columns_by_id[column["id"]] = column
@@ -677,25 +521,7 @@ class NocoDBSyncService:
             batch = unique_ids[start : start + RECORD_PAGE_SIZE]
             client.delete_records(table_id, [{"Id": record_id} for record_id in batch])
 
-    def _upsert_order(self, table_id: str, order: Order) -> int:
-        client = self._get_client()
-        order_obj = cast(Any, order)
-        existing = client.list_records(
-            table_id,
-            where=self._where_equals(ORDER_KEY_FIELD, order_obj.code),
-            fields=["Id", ORDER_KEY_FIELD],
-            limit=1,
-        )
-        payload = self._order_payload(order)
-        if existing:
-            payload["Id"] = existing[0]["Id"]
-            client.update_records(table_id, [payload])
-            return int(existing[0]["Id"])
-
-        created = client.create_records(table_id, [payload])
-        return int(created[0]["Id"])
-
-    def _upsert_participants(self, schema: SchemaState, order: Order, order_row_id: int) -> None:
+    def _upsert_participants(self, schema: SchemaState, order: Order) -> None:
         client = self._get_client()
         order_obj = cast(Any, order)
 
@@ -707,23 +533,7 @@ class NocoDBSyncService:
         position_pks = [position.pk for position in positions]
         position_pks_set = set(position_pks)
 
-        linked_rows = client.list_linked_records(
-            schema.orders_table_id,
-            schema.order_reciprocal_link_column_id,
-            order_row_id,
-            fields=["Id", PARTICIPANT_KEY_FIELD],
-            limit=1000,
-        )
-        linked_ids: set[int] = {int(row["Id"]) for row in linked_rows}
-
-        row_position_pk: dict[int, int | None] = {}
-        for row in linked_rows:
-            pk_val = row.get(PARTICIPANT_KEY_FIELD)
-            row_position_pk[int(row["Id"])] = int(pk_val) if pk_val is not None else None
-
-        # Also pull any participants keyed by the current positions; that catches
-        # orphan rows whose order link was lost (e.g. legacy column migration)
-        # plus duplicate rows that a previous broken sync created.
+        existing_by_pk: dict[int, list[int]] = {}
         if position_pks:
             for row in client.list_records(
                 schema.participants_table_id,
@@ -734,22 +544,14 @@ class NocoDBSyncService:
                 pk_val = row.get(PARTICIPANT_KEY_FIELD)
                 if pk_val is None:
                     continue
-                row_position_pk.setdefault(int(row["Id"]), int(pk_val))
-
-        by_position: dict[int, list[int]] = {}
-        stale_ids: list[int] = []
-        for row_id, pk_val in row_position_pk.items():
-            if pk_val is None:
-                continue
-            if pk_val in position_pks_set:
-                by_position.setdefault(pk_val, []).append(row_id)
-            else:
-                stale_ids.append(row_id)
+                existing_by_pk.setdefault(int(pk_val), []).append(int(row["Id"]))
 
         canonical: dict[int, int] = {}
         duplicate_row_ids: list[int] = []
-        for pk, row_ids in by_position.items():
-            sorted_ids = sorted(row_ids, key=lambda rid: (rid not in linked_ids, rid))
+        for pk, row_ids in existing_by_pk.items():
+            if pk not in position_pks_set:
+                continue
+            sorted_ids = sorted(row_ids)
             canonical[pk] = sorted_ids[0]
             duplicate_row_ids.extend(sorted_ids[1:])
 
@@ -759,7 +561,7 @@ class NocoDBSyncService:
                 [{"Id": row_id} for row_id in duplicate_row_ids],
             )
 
-        creates: list[tuple[int, dict[str, Any]]] = []
+        creates: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         for position in positions:
             payload = self._participant_payload(schema, order, position)
@@ -768,78 +570,13 @@ class NocoDBSyncService:
                 payload["Id"] = existing_id
                 updates.append(payload)
             else:
-                creates.append((position.pk, payload))
+                creates.append(payload)
 
         if creates:
-            created = client.create_records(
-                schema.participants_table_id, [payload for _, payload in creates]
-            )
-            for (_, _), created_row in zip(creates, created, strict=True):
-                client.link_records(
-                    schema.participants_table_id,
-                    schema.order_link_column_id,
-                    int(created_row["Id"]),
-                    order_row_id,
-                )
+            client.create_records(schema.participants_table_id, creates)
 
         if updates:
             client.update_records(schema.participants_table_id, updates)
-
-        for row_id in canonical.values():
-            if row_id not in linked_ids:
-                client.link_records(
-                    schema.participants_table_id,
-                    schema.order_link_column_id,
-                    row_id,
-                    order_row_id,
-                )
-
-        if stale_ids:
-            client.delete_records(
-                schema.participants_table_id, [{"Id": row_id} for row_id in stale_ids]
-            )
-
-    def _order_payload(self, order: Order) -> dict[str, Any]:
-        order_obj = cast(Any, order)
-        payment_date = (
-            order_obj.payments.filter(state=OrderPayment.PAYMENT_STATE_CONFIRMED)
-            .aggregate(latest=Max("payment_date"))
-            .get("latest")
-        )
-        return {
-            ORDER_KEY_FIELD: str(order_obj.code),
-            "status": self._status_label(order_obj.status),
-            "email": order_obj.email,
-            "phone": order_obj.phone,
-            "locale": order_obj.locale,
-            "sales_channel": order_obj.sales_channel.identifier,
-            "datetime": self._serialize_datetime(order_obj.datetime),
-            "expires": self._serialize_datetime(order_obj.expires),
-            "payment_date": self._serialize_datetime(payment_date),
-            "cancellation_date": self._serialize_datetime(order_obj.cancellation_date),
-            "total": self._serialize_decimal(order_obj.total),
-            "currency": str(order_obj.event.currency),
-            "testmode": order_obj.testmode,
-            "valid_if_pending": order_obj.valid_if_pending,
-            "require_approval": order_obj.require_approval,
-            "raw_json": {
-                "code": str(order_obj.code),
-                "status": str(order_obj.status),
-                "email": order_obj.email,
-                "phone": order_obj.phone,
-                "locale": order_obj.locale,
-                "sales_channel": order_obj.sales_channel.identifier,
-                "datetime": self._serialize_datetime(order_obj.datetime),
-                "expires": self._serialize_datetime(order_obj.expires),
-                "payment_date": self._serialize_datetime(payment_date),
-                "cancellation_date": self._serialize_datetime(order_obj.cancellation_date),
-                "total": str(order_obj.total),
-                "currency": str(order_obj.event.currency),
-                "testmode": order_obj.testmode,
-                "valid_if_pending": order_obj.valid_if_pending,
-                "require_approval": order_obj.require_approval,
-            },
-        }
 
     def _participant_payload(
         self,
@@ -866,6 +603,7 @@ class NocoDBSyncService:
 
         return {
             PARTICIPANT_KEY_FIELD: position_obj.pk,
+            ORDER_CODE_FIELD: str(order_obj.code),
             "order_status": self._status_label(order_obj.status),
             "positionid": position_obj.positionid,
             "pretix_item_id": position_obj.item_id,
@@ -885,6 +623,7 @@ class NocoDBSyncService:
             "raw_json": {
                 "position_pk": position_obj.pk,
                 "positionid": position_obj.positionid,
+                "order_code": str(order_obj.code),
                 "item_id": position_obj.item_id,
                 "variation_id": position_obj.variation_id,
                 "item_name": self._i18n_to_str(position_obj.item.name),

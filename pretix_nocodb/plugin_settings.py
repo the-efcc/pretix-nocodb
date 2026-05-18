@@ -12,9 +12,7 @@ _DEFAULTS = {
     "plugin_nocodb_api_token": ("", str),
     "plugin_nocodb_workspace_id": ("", str),
     "plugin_nocodb_base_id": ("", str),
-    "plugin_nocodb_orders_table_id": ("", str),
     "plugin_nocodb_participants_table_id": ("", str),
-    "plugin_nocodb_questions_table_id": ("", str),
 }
 
 
@@ -34,9 +32,7 @@ class NocoDBConfig:
     api_token: str
     workspace_id: str
     base_id: str
-    orders_table_id: str
     participants_table_id: str
-    questions_table_id: str
 
     @classmethod
     def from_event(cls, event) -> NocoDBConfig:
@@ -47,9 +43,7 @@ class NocoDBConfig:
             api_token=settings.get("api_token", default=""),
             workspace_id=settings.get("workspace_id", default=""),
             base_id=settings.get("base_id", default=""),
-            orders_table_id=settings.get("orders_table_id", default=""),
             participants_table_id=settings.get("participants_table_id", default=""),
-            questions_table_id=settings.get("questions_table_id", default=""),
         )
 
     @property

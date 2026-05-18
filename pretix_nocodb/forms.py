@@ -8,7 +8,7 @@ from pretix.base.forms import SecretKeySettingsField, SettingsForm
 class NocoDBSettingsForm(SettingsForm):
     plugin_nocodb_enabled = forms.BooleanField(
         label=_("Enable NocoDB sync"),
-        help_text=_("When enabled, orders are synced to NocoDB on every change."),
+        help_text=_("When enabled, participants are synced to NocoDB on every change."),
         required=False,
     )
     plugin_nocodb_api_url = forms.URLField(
