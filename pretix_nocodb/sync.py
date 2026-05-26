@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
@@ -275,13 +274,21 @@ class NocoDBSyncService:
     ) -> dict[str, Any]:
         client = self._get_client()
         payload = self._question_column_payload(question, title=title)
-        with suppress(NocoDBAPIError):
+        create_error: NocoDBAPIError | None = None
+        try:
             client.create_column(table_id, payload)
+        except NocoDBAPIError as exc:
+            create_error = exc
 
         refreshed = self._fetch_table_state(table_id)
         column = refreshed.columns_by_name.get(payload["column_name"])
         if column:
             return column
+        if create_error is not None:
+            raise RuntimeError(
+                f"Question column {payload['column_name']} was not created: "
+                f"status={create_error.status_code} payload={create_error.payload!r}"
+            ) from create_error
         raise RuntimeError(f"Question column {payload['column_name']} was not created")
 
     def _update_question_column(
