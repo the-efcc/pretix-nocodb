@@ -75,6 +75,8 @@ python-version = "3.11"
 
 [tool.ty.rules]
 all = "error"
+# @typing.override requires Python >= 3.12; this plugin still supports 3.11.
+missing-override-decorator = "ignore"
 
 [tool.ruff]
 line-length = 100

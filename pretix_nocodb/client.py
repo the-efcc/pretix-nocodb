@@ -5,6 +5,9 @@ from typing import Any
 
 import requests
 
+PAYLOAD_SUMMARY_LENGTH = 500
+TRANSIENT_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
 
 class NocoDBAPIError(RuntimeError):
     def __init__(
@@ -13,10 +16,39 @@ class NocoDBAPIError(RuntimeError):
         *,
         status_code: int | None = None,
         payload: Any = None,
+        retry_after: int | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+        self.retry_after = retry_after
+
+    @property
+    def is_transient(self) -> bool:
+        # status_code None means the request never got an HTTP response
+        # (connection error, timeout), which is worth retrying too.
+        return self.status_code is None or self.status_code in TRANSIENT_STATUS_CODES
+
+
+def _summarize_payload(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, dict):
+        for key in ("message", "msg", "error"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value[:PAYLOAD_SUMMARY_LENGTH]
+    text = payload if isinstance(payload, str) else repr(payload)
+    return " ".join(text.split())[:PAYLOAD_SUMMARY_LENGTH]
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return max(int(value), 1)
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -47,22 +79,32 @@ class NocoDBClient:
         json: Any = None,
     ) -> Any:
         assert self.session is not None
-        response = self.session.request(
-            method=method,
-            url=f"{self.base_url}{path}",
-            params=params,
-            json=json,
-            timeout=30,
-        )
+        try:
+            response = self.session.request(
+                method=method,
+                url=f"{self.base_url}{path}",
+                params=params,
+                json=json,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise NocoDBAPIError(
+                f"NocoDB request failed on {method} {path}: {type(exc).__name__}: {exc}"
+            ) from exc
         if response.status_code >= 400:
             try:
                 payload = response.json()
             except ValueError:
                 payload = response.text
+            message = f"NocoDB API error on {method} {path}: HTTP {response.status_code}"
+            summary = _summarize_payload(payload)
+            if summary:
+                message = f"{message} - {summary}"
             raise NocoDBAPIError(
-                f"NocoDB API error on {method} {path}",
+                message,
                 status_code=response.status_code,
                 payload=payload,
+                retry_after=_parse_retry_after(response.headers.get("Retry-After")),
             )
         if not response.content:
             return None
