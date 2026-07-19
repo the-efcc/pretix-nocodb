@@ -155,8 +155,9 @@ class NocoDBSyncService:
             question_columns=question_columns,
         )
 
-    def sync_order(self, order: Order) -> None:
-        schema = self.sync_schema()
+    def sync_order(self, order: Order, schema: SchemaState | None = None) -> None:
+        if schema is None:
+            schema = self.sync_schema()
         if schema is None:
             return
 

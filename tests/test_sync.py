@@ -874,6 +874,29 @@ def test_prune_deleted_rows_removes_stale_participants(event, order):
     }
 
 
+def test_sync_order_reuses_provided_schema(event, order, monkeypatch):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(
+        order=order, item=item, price=Decimal("10"), attendee_name_cached="Ada",
+    )
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    schema = service.sync_schema()
+
+    def fail_on_resync():
+        raise AssertionError("sync_order must not re-run the schema sync")
+
+    monkeypatch.setattr(service, "sync_schema", fail_on_resync)
+    service.sync_order(order, schema=schema)
+
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    assert len(client.records[participants_table["id"]]) == 1
+
+
 def test_sync_skips_when_base_id_missing(event, order):
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
     OrderPosition.objects.create(order=order, item=item, price=Decimal("10"))

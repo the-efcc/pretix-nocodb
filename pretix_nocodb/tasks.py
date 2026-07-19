@@ -64,7 +64,8 @@ def delete_order_from_nocodb(
 def sync_all_orders_to_nocodb(self, event) -> None:
     service = NocoDBSyncService(event)
     try:
-        if service.sync_schema() is None:
+        schema = service.sync_schema()
+        if schema is None:
             return
         with scopes_disabled():
             orders = list(Order.objects.filter(event=event))
@@ -72,7 +73,7 @@ def sync_all_orders_to_nocodb(self, event) -> None:
                 OrderPosition.objects.filter(order__event=event).values_list("pk", flat=True)
             )
         for order in orders:
-            service.sync_order(order)
+            service.sync_order(order, schema=schema)
         service.prune_deleted_rows(active_position_ids=position_ids)
     except NocoDBAPIError as exc:
         _retry_if_transient(self, exc)
