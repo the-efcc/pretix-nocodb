@@ -21,6 +21,8 @@ EVENT_FIELD = "pretix_event"
 SELECT_OPTION_COLOR = "#1f3a5f"
 STATUS_OPTIONS = ["pending", "paid", "expired", "canceled"]
 RECORD_PAGE_SIZE = 200
+# Ids per where-in filter; keeps the query string well below URL length limits.
+WHERE_IN_BATCH_SIZE = 100
 
 
 def _column(
@@ -174,8 +176,8 @@ class NocoDBSyncService:
         participant_ids: set[int] = set()
         unique_positions = sorted({int(position_id) for position_id in position_ids or []})
         if unique_positions:
-            for start in range(0, len(unique_positions), 100):
-                batch = unique_positions[start : start + 100]
+            for start in range(0, len(unique_positions), WHERE_IN_BATCH_SIZE):
+                batch = unique_positions[start : start + WHERE_IN_BATCH_SIZE]
                 for row in self._list_all_records(
                     self.config.participants_table_id,
                     fields=["Id", PARTICIPANT_KEY_FIELD],
@@ -592,12 +594,12 @@ class NocoDBSyncService:
         position_pks_set = set(position_pks)
 
         existing_by_pk: dict[int, list[int]] = {}
-        if position_pks:
-            for row in client.list_records(
+        for start in range(0, len(position_pks), WHERE_IN_BATCH_SIZE):
+            batch = position_pks[start : start + WHERE_IN_BATCH_SIZE]
+            for row in self._list_all_records(
                 schema.participants_table_id,
-                where=self._where_in(PARTICIPANT_KEY_FIELD, position_pks),
                 fields=["Id", PARTICIPANT_KEY_FIELD],
-                limit=max(len(position_pks) * 4, 200),
+                where=self._where_in(PARTICIPANT_KEY_FIELD, batch),
             ):
                 pk_val = row.get(PARTICIPANT_KEY_FIELD)
                 if pk_val is None:

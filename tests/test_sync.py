@@ -846,6 +846,33 @@ def test_sync_deduplicates_existing_participant_rows(event, order):
     assert second_id not in {row["Id"] for row in rows}
 
 
+def test_sync_batches_existing_row_lookup_for_large_orders(event, order, monkeypatch):
+    monkeypatch.setattr("pretix_nocodb.sync.WHERE_IN_BATCH_SIZE", 2)
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    positions = [
+        OrderPosition.objects.create(
+            order=order, item=item, price=Decimal("10"), attendee_name_cached=f"Attendee {i}",
+        )
+        for i in range(5)
+    ]
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    service.sync_order(order)
+    # The second sync must find every existing row across batches and update
+    # instead of creating duplicates.
+    service.sync_order(order)
+
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    rows = client.records[participants_table["id"]]
+    assert sorted(row[PARTICIPANT_KEY_FIELD] for row in rows) == sorted(
+        position.pk for position in positions
+    )
+
+
 def test_delete_order_removes_participant_rows(event, order):
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
     first_position = OrderPosition.objects.create(
