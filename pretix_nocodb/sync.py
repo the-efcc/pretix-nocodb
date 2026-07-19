@@ -17,6 +17,7 @@ MAX_COLUMN_TITLE_LENGTH = 255
 
 PARTICIPANT_KEY_FIELD = "pretix_position_id"
 ORDER_CODE_FIELD = "pretix_order_code"
+EVENT_FIELD = "pretix_event"
 SELECT_OPTION_COLOR = "#1f3a5f"
 STATUS_OPTIONS = ["pending", "paid", "expired", "canceled"]
 RECORD_PAGE_SIZE = 200
@@ -48,6 +49,7 @@ def _column(
 PARTICIPANTS_COLUMNS = [
     _column(PARTICIPANT_KEY_FIELD, "Number", rqd=True),
     _column(ORDER_CODE_FIELD, "SingleLineText"),
+    _column(EVENT_FIELD, "SingleLineText"),
     _column("order_status", "SingleLineText"),
     _column("positionid", "Number"),
     _column("pretix_item_id", "Number"),
@@ -184,12 +186,16 @@ class NocoDBSyncService:
                         participant_ids.add(int(row_id))
 
         # Fall back to the order code so stray rows linked to the deleted order
-        # are removed even if their position id wasn't supplied.
+        # are removed even if their position id wasn't supplied. Order codes are
+        # only unique per event, so rows tagged with another event are skipped
+        # (untagged rows predate the event tag and are treated as ours).
         for row in self._list_all_records(
             self.config.participants_table_id,
-            fields=["Id", ORDER_CODE_FIELD],
+            fields=["Id", ORDER_CODE_FIELD, EVENT_FIELD],
             where=self._where_equals(ORDER_CODE_FIELD, order_code),
         ):
+            if row.get(EVENT_FIELD) not in (self._event_tag(), None, ""):
+                continue
             row_id = row.get("Id")
             if row_id is not None:
                 participant_ids.add(int(row_id))
@@ -202,10 +208,14 @@ class NocoDBSyncService:
         if not self.config.participants_table_id:
             return
 
+        # Only rows tagged with this event are considered: several events may
+        # share a base, and untagged rows (created before the event tag existed)
+        # cannot be attributed safely.
         stale_participant_ids: list[int] = []
         for row in self._list_all_records(
             self.config.participants_table_id,
             fields=["Id", PARTICIPANT_KEY_FIELD],
+            where=self._where_equals(EVENT_FIELD, self._event_tag()),
         ):
             position_id = row.get(PARTICIPANT_KEY_FIELD)
             if position_id is None or int(position_id) in active_position_ids:
@@ -612,6 +622,7 @@ class NocoDBSyncService:
         return {
             PARTICIPANT_KEY_FIELD: position_obj.pk,
             ORDER_CODE_FIELD: str(order_obj.code),
+            EVENT_FIELD: self._event_tag(),
             "order_status": self._status_label(order_obj.status),
             "positionid": position_obj.positionid,
             "pretix_item_id": position_obj.item_id,
@@ -754,6 +765,9 @@ class NocoDBSyncService:
 
     def _question_column_name(self, identifier: Any) -> str:
         return f"q_{identifier}"
+
+    def _event_tag(self) -> str:
+        return f"{self.event.organizer.slug}/{self.event.slug}"
 
     def _persist_setting(self, key: str, value: str) -> None:
         settings_for_event(self.event).set(key, value)

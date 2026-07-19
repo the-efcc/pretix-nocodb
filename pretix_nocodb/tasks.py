@@ -69,11 +69,14 @@ def sync_all_orders_to_nocodb(self, event) -> None:
             return
         with scopes_disabled():
             orders = list(Order.objects.filter(event=event))
+        for order in orders:
+            service.sync_order(order, schema=schema)
+        # Snapshot the active positions after the sync loop so orders placed
+        # while it ran (and synced concurrently) are not pruned as stale.
+        with scopes_disabled():
             position_ids = set(
                 OrderPosition.objects.filter(order__event=event).values_list("pk", flat=True)
             )
-        for order in orders:
-            service.sync_order(order, schema=schema)
         service.prune_deleted_rows(active_position_ids=position_ids)
     except NocoDBAPIError as exc:
         _retry_if_transient(self, exc)
