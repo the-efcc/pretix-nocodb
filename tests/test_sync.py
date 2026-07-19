@@ -627,6 +627,63 @@ def test_sync_upgrades_item_and_variation_columns_to_single_select(event, order)
     assert ticket_row["Variation name"] == "Early bird"
 
 
+def test_sync_keeps_select_options_for_removed_items(event):
+    early = Item.objects.create(event=event, name="Early bird", default_price=Decimal("8"))
+    Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    service.sync_schema()
+
+    early.delete()
+    service.sync_schema()
+
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    item_column = next(
+        column
+        for column in participants_table["columns"]
+        if column.get("column_name") == "item_name"
+    )
+    # The removed item's option must survive: dropping it would clear the
+    # value from historical rows in NocoDB.
+    assert [opt["title"] for opt in item_column["colOptions"]["options"]] == [
+        "Early bird",
+        "Regular",
+    ]
+
+
+def test_sync_keeps_choice_options_removed_from_question(event):
+    question = Question.objects.create(
+        event=event,
+        question="T-Shirt size",
+        type=Question.TYPE_CHOICE,
+        required=False,
+        identifier="TSHIRT",
+    )
+    QuestionOption.objects.create(question=question, identifier="SZ_S", answer="S")
+    removed = QuestionOption.objects.create(question=question, identifier="SZ_M", answer="M")
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    service.sync_schema()
+
+    removed.delete()
+    QuestionOption.objects.create(question=question, identifier="SZ_L", answer="L")
+    service.sync_schema()
+
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    column = next(
+        col for col in participants_table["columns"] if col.get("column_name") == "q_TSHIRT"
+    )
+    assert [opt["title"] for opt in column["colOptions"]["options"]] == ["S", "M", "L"]
+
+
 def test_sync_extracts_attendee_name_parts(event, order):
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
     OrderPosition.objects.create(

@@ -311,19 +311,18 @@ class NocoDBSyncService:
     ) -> dict[str, Any]:
         client = self._get_client()
         desired = self._question_column_payload(question, title=title)
-        client.update_column(
-            column["id"],
-            {
-                "title": desired["title"],
-                "description": desired["description"],
-                "uidt": desired["uidt"],
-                **(
-                    {"colOptions": desired["colOptions"]}
-                    if desired.get("colOptions") is not None
-                    else {}
-                ),
-            },
-        )
+        payload: dict[str, Any] = {
+            "title": desired["title"],
+            "description": desired["description"],
+            "uidt": desired["uidt"],
+        }
+        if desired.get("colOptions") is not None:
+            payload["colOptions"] = {
+                "options": self._merge_select_options(
+                    column, desired["colOptions"]["options"]
+                )
+            }
+        client.update_column(column["id"], payload)
         refreshed = self._fetch_table_state(column["fk_model_id"])
         updated = refreshed.columns_by_name.get(self._question_column_name(question.identifier))
         if updated:
@@ -341,7 +340,9 @@ class NocoDBSyncService:
             column.get("title") != desired["title"]
             or column.get("description") != desired["description"]
             or column.get("uidt") != desired["uidt"]
-            or self._column_option_titles(column) != self._column_option_titles(desired)
+            or not set(self._column_option_titles(desired)).issubset(
+                self._column_option_titles(column)
+            )
         )
 
     def _question_column_payload(self, question: Question, *, title: str) -> dict[str, Any]:
@@ -387,6 +388,25 @@ class NocoDBSyncService:
             if option.get("title")
         ]
 
+    def _merge_select_options(
+        self,
+        column: dict[str, Any],
+        desired_options: list[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        # Existing options are kept even when they no longer exist in pretix:
+        # NocoDB clears the cell value from every record whose option is
+        # removed, which would destroy historical data (e.g. positions bought
+        # for a since-deleted item).
+        existing = [
+            option
+            for option in (column.get("colOptions") or {}).get("options", [])
+            if option.get("title")
+        ]
+        existing_titles = {str(option["title"]) for option in existing}
+        return existing + [
+            option for option in desired_options if option["title"] not in existing_titles
+        ]
+
     def _collect_item_options(self) -> tuple[list[str], list[str]]:
         items = list(
             cast(Any, self.event).items.prefetch_related("variations").order_by("position", "pk")
@@ -420,10 +440,12 @@ class NocoDBSyncService:
         desired_options = [
             {"title": option, "color": SELECT_OPTION_COLOR} for option in options
         ]
+        merged_options = self._merge_select_options(column, desired_options)
         if (
             column.get("uidt") == "SingleSelect"
             and column.get("title") == title
-            and self._column_option_titles(column) == options
+            and self._column_option_titles(column)
+            == [str(option["title"]) for option in merged_options]
         ):
             return table_state
 
@@ -433,7 +455,7 @@ class NocoDBSyncService:
             {
                 "title": title,
                 "uidt": "SingleSelect",
-                "colOptions": {"options": desired_options},
+                "colOptions": {"options": merged_options},
             },
         )
         return self._fetch_table_state(table_state.id)
