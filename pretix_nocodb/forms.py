@@ -23,14 +23,18 @@ class NocoDBSettingsForm(SettingsForm):
     )
     plugin_nocodb_workspace_id = forms.CharField(
         label=_("Workspace ID"),
-        help_text=_("Optional workspace ID. Leave empty to use the default workspace."),
+        help_text=_(
+            "Workspace to create the base in (required on NocoDB cloud when no "
+            "base ID is set). Leave empty on self-hosted instances."
+        ),
         required=False,
     )
     plugin_nocodb_base_id = forms.CharField(
         label=_("Base ID"),
         help_text=_(
-            "ID of the NocoDB base that holds this event's data. "
-            "Create the base in NocoDB first, then paste its ID here."
+            "Optional. ID of an existing NocoDB base to sync this event's data "
+            "into. Leave empty to let the plugin create a base for this event "
+            "automatically."
         ),
-        required=True,
+        required=False,
     )

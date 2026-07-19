@@ -52,5 +52,4 @@ class NocoDBConfig:
             self.enabled
             and bool(self.api_url.strip())
             and bool(self.api_token.strip())
-            and bool(self.base_id.strip())
         )

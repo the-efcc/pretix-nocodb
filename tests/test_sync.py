@@ -1035,7 +1035,61 @@ def test_sync_order_reuses_provided_schema(event, order, monkeypatch):
     assert len(client.records[participants_table["id"]]) == 1
 
 
-def test_sync_skips_when_base_id_missing(event, order):
+def test_sync_creates_base_when_none_configured(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(order=order, item=item, price=Decimal("10"))
+
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+
+    service.sync_order(order)
+
+    assert len(client.bases) == 1
+    base = client.bases[0]
+    assert base["title"] == str(event.name)
+    assert base["workspace_id"] == "workspace-1"
+    assert event.settings.get("plugin_nocodb_base_id") == base["id"]
+
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    assert len(client.records[participants_table["id"]]) == 1
+
+
+def test_sync_never_adopts_a_same_titled_base(event):
+    client = FakeNocoDBClient()
+    # Another event's base that happens to carry the same name.
+    other = client.create_base(str(event.name))
+
+    service = NocoDBSyncService(event, client=client)
+    service.sync_schema()
+
+    # A fresh base must be created; adopting the existing one would silently
+    # merge two events into one participants table.
+    assert len(client.bases) == 2
+    assert event.settings.get("plugin_nocodb_base_id") != other["id"]
+
+    # Subsequent syncs reuse the persisted base instead of creating more.
+    NocoDBSyncService(event, client=client).sync_schema()
+    assert len(client.bases) == 2
+
+
+def test_sync_picks_up_base_persisted_after_service_init(event):
+    client = FakeNocoDBClient()
+    service = NocoDBSyncService(event, client=client)
+
+    # A concurrent first sync persists a base id after this service was built.
+    concurrent = client.create_base(str(event.name))
+    event.settings.set("plugin_nocodb_base_id", concurrent["id"])
+
+    service.sync_schema()
+
+    assert len(client.bases) == 1
+    assert event.settings.get("plugin_nocodb_base_id") == concurrent["id"]
+
+
+def test_sync_skips_when_disabled(event, order):
+    event.settings.set("plugin_nocodb_enabled", False)
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
     OrderPosition.objects.create(order=order, item=item, price=Decimal("10"))
 

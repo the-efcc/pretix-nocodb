@@ -227,7 +227,25 @@ class NocoDBSyncService:
         self._delete_record_ids(self.config.participants_table_id, stale_participant_ids)
 
     def _ensure_base(self) -> str:
-        return self.config.base_id
+        if self.config.base_id:
+            return self.config.base_id
+
+        # Re-read the persisted id right before creating: a concurrent first
+        # sync may have created the base since this service was initialized.
+        persisted = settings_for_event(self.event).get("base_id", default="")
+        if persisted:
+            self.config.base_id = persisted
+            return persisted
+
+        # Always create a fresh base rather than adopting a same-titled one:
+        # event names are not unique, and adopting another event's base would
+        # silently merge both events into one participants table.
+        client = self._get_client()
+        title = self._i18n_to_str(self.event.name).strip() or self.event.slug
+        base = client.create_base(title, workspace_id=self.config.workspace_id)
+        self._persist_setting("base_id", base["id"])
+        self.config.base_id = base["id"]
+        return base["id"]
 
     def _ensure_participants_table(self, base_id: str) -> str:
         client = self._get_client()
