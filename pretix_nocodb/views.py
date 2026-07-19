@@ -10,6 +10,7 @@ from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.control.views.event import EventSettingsFormView, EventSettingsViewMixin
 
 from .forms import NocoDBSettingsForm
+from .plugin_settings import NocoDBConfig
 from .tasks import sync_all_orders_to_nocodb
 
 
@@ -33,8 +34,19 @@ class NocoDBSyncNowView(EventPermissionRequiredMixin, View):
     permission = "event.settings.general:write"
 
     def post(self, request, *args, **kwargs):
-        sync_all_orders_to_nocodb.apply_async(kwargs={"event": request.event.pk})
-        messages.success(request, _("Sync started. All orders will be synced to NocoDB shortly."))
+        if NocoDBConfig.from_event(request.event).can_sync:
+            sync_all_orders_to_nocodb.apply_async(kwargs={"event": request.event.pk})
+            messages.success(
+                request, _("Sync started. All orders will be synced to NocoDB shortly.")
+            )
+        else:
+            messages.error(
+                request,
+                _(
+                    "NocoDB sync is not configured. Enable it and fill in the "
+                    "NocoDB URL and API token first."
+                ),
+            )
         return redirect(reverse(
             "plugins:pretix_nocodb:settings",
             kwargs={
