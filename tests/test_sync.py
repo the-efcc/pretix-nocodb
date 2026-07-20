@@ -1115,6 +1115,33 @@ def test_sync_picks_up_base_persisted_after_service_init(event):
     assert event.settings.get("plugin_nocodb_base_id") == concurrent["id"]
 
 
+def test_sync_ignores_participants_table_from_a_different_base(event, order):
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(order=order, item=item, price=Decimal("10"))
+
+    client = FakeNocoDBClient()
+
+    # First sync into the original base persists its participants table id.
+    old_base = _attach_base(event, client)
+    NocoDBSyncService(event, client=client).sync_order(order)
+    old_table_id = event.settings.get("plugin_nocodb_participants_table_id")
+    assert client.tables[old_table_id]["base_id"] == old_base
+
+    # The event is repointed at a new base. Table ids are global in NocoDB, so
+    # the stale id still resolves via get_table; the sync must not adopt it.
+    new_base = client.create_base(str(event.name))
+    event.settings.set("plugin_nocodb_base_id", new_base["id"])
+
+    NocoDBSyncService(event, client=client).sync_order(order)
+
+    new_table_id = event.settings.get("plugin_nocodb_participants_table_id")
+    assert new_table_id != old_table_id
+    assert client.tables[new_table_id]["base_id"] == new_base["id"]
+    # The old base's table is left untouched; rows land in the new base only.
+    assert len(client.records[old_table_id]) == 1
+    assert len(client.records[new_table_id]) == 1
+
+
 def test_sync_skips_when_disabled(event, order):
     event.settings.set("plugin_nocodb_enabled", False)
     item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))

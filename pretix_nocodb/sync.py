@@ -260,7 +260,12 @@ class NocoDBSyncService:
             except NocoDBAPIError:
                 table = None
             else:
-                table_id = table["id"]
+                # Table ids are global in NocoDB, so a stale id from a
+                # previously configured base still resolves. Only adopt it when
+                # it actually lives in this base, otherwise a base change would
+                # keep syncing into the old base's table.
+                if table.get("base_id") == base_id:
+                    table_id = table["id"]
 
         if not table_id and TABLE_PARTICIPANTS in existing_tables:
             table_id = existing_tables[TABLE_PARTICIPANTS]["id"]
