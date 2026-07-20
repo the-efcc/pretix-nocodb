@@ -5,20 +5,26 @@
     <h1>{% trans "NocoDB sync" %}</h1>
     <p>
         {% blocktrans trimmed %}
-            Configure the NocoDB instance to sync this event's participants and answers to.
-            The plugin creates a base for this event automatically; alternatively, paste
-            the ID of an existing base below and the plugin will only create a
-            participants table inside it.
+            Sync this event's participants and answers to NocoDB. The NocoDB URL and
+            API token are configured once for the whole organizer and inherited by
+            every event.
+        {% endblocktrans %}
+    </p>
+    <p>
+        {% blocktrans trimmed %}
+            The plugin provisions a base for this event automatically on the next
+            sync; alternatively, paste the ID of an existing base below and the
+            plugin will only create a participants table inside it.
         {% endblocktrans %}
     </p>
     <form action="" method="post" class="form-horizontal">
         {% csrf_token %}
         {% bootstrap_form_errors form %}
         {% bootstrap_field form.plugin_nocodb_enabled layout="horizontal" %}
-        {% bootstrap_field form.plugin_nocodb_api_url layout="horizontal" %}
-        {% bootstrap_field form.plugin_nocodb_api_token layout="horizontal" %}
-        {% bootstrap_field form.plugin_nocodb_workspace_id layout="horizontal" %}
         {% bootstrap_field form.plugin_nocodb_base_id layout="horizontal" %}
+        {% if form.plugin_nocodb_base_creation_mode %}
+            {% bootstrap_field form.plugin_nocodb_base_creation_mode layout="horizontal" %}
+        {% endif %}
         <div class="form-group">
             <div class="col-md-9 col-md-offset-3">
                 <button type="submit" form="nocodb-sync-form" class="btn btn-default">

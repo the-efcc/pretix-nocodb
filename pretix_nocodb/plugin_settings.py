@@ -6,13 +6,25 @@ from pretix.base.settings import SettingsSandbox, settings_hierarkey
 
 PLUGIN_SETTINGS_PREFIX = ("plugin", "nocodb")
 
+# How a new base is provisioned when an event has no base yet.
+BASE_MODE_NEW = "new"
+BASE_MODE_DUPLICATE = "duplicate"
+
 _DEFAULTS = {
     "plugin_nocodb_enabled": ("False", bool),
+    # api_url/token/workspace are configured once per organizer and inherited by
+    # every event through pretix' settings cascade; they may still be overridden
+    # per event if needed.
     "plugin_nocodb_api_url": ("https://app.nocodb.com", str),
     "plugin_nocodb_api_token": ("", str),
     "plugin_nocodb_workspace_id": ("", str),
     "plugin_nocodb_base_id": ("", str),
     "plugin_nocodb_participants_table_id": ("", str),
+    # Base of the event this one was copied from (recorded on event copy). When
+    # set, the event may duplicate that base's structure instead of starting
+    # from scratch.
+    "plugin_nocodb_source_base_id": ("", str),
+    "plugin_nocodb_base_creation_mode": (BASE_MODE_NEW, str),
 }
 
 
@@ -25,6 +37,10 @@ def settings_for_event(event) -> SettingsSandbox:
     return SettingsSandbox(*PLUGIN_SETTINGS_PREFIX, event)
 
 
+def settings_for_organizer(organizer) -> SettingsSandbox:
+    return SettingsSandbox(*PLUGIN_SETTINGS_PREFIX, organizer)
+
+
 @dataclass(slots=True)
 class NocoDBConfig:
     enabled: bool
@@ -33,6 +49,8 @@ class NocoDBConfig:
     workspace_id: str
     base_id: str
     participants_table_id: str
+    source_base_id: str
+    base_creation_mode: str
 
     @classmethod
     def from_event(cls, event) -> NocoDBConfig:
@@ -44,6 +62,15 @@ class NocoDBConfig:
             workspace_id=settings.get("workspace_id", default=""),
             base_id=settings.get("base_id", default=""),
             participants_table_id=settings.get("participants_table_id", default=""),
+            source_base_id=settings.get("source_base_id", default=""),
+            base_creation_mode=settings.get("base_creation_mode", default=BASE_MODE_NEW),
+        )
+
+    @property
+    def should_duplicate_source_base(self) -> bool:
+        return (
+            self.base_creation_mode == BASE_MODE_DUPLICATE
+            and bool(self.source_base_id.strip())
         )
 
     @property

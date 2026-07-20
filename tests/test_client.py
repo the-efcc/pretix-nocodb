@@ -98,3 +98,23 @@ def test_successful_request_returns_json():
     session = StubSession(response=_response(200, content=b'{"list": [{"id": "m_1"}]}'))
 
     assert _client(session).list_tables("pbase") == [{"id": "m_1"}]
+
+
+def test_duplicate_base_posts_options_and_returns_ids():
+    session = StubSession(
+        response=_response(200, content=b'{"id": "job_1", "base_id": "p_new"}'),
+    )
+
+    result = _client(session).duplicate_base("p_src")
+
+    assert result == {"id": "job_1", "base_id": "p_new"}
+    call = session.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == "https://app.nocodb.test/api/v2/meta/duplicate/p_src"
+    assert call["json"] == {
+        "options": {
+            "excludeData": True,
+            "excludeViews": False,
+            "excludeHooks": True,
+        }
+    }

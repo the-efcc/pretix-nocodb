@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
@@ -23,6 +24,12 @@ STATUS_OPTIONS = ["pending", "paid", "expired", "canceled"]
 RECORD_PAGE_SIZE = 200
 # Ids per where-in filter; keeps the query string well below URL length limits.
 WHERE_IN_BATCH_SIZE = 100
+
+# Base duplication runs the schema/view copy in a background job. Poll the new
+# base until the participants table it should contain shows up before syncing
+# into it, so we adopt the copied table instead of creating a second one.
+BASE_DUPLICATION_POLL_INTERVAL = 2.0
+BASE_DUPLICATION_MAX_ATTEMPTS = 60
 
 
 def _column(
@@ -239,15 +246,50 @@ class NocoDBSyncService:
             self.config.base_id = persisted
             return persisted
 
-        # Always create a fresh base rather than adopting a same-titled one:
-        # event names are not unique, and adopting another event's base would
-        # silently merge both events into one participants table.
         client = self._get_client()
         title = self._i18n_to_str(self.event.name).strip() or self.event.slug
-        base = client.create_base(title, workspace_id=self.config.workspace_id)
-        self._persist_setting("base_id", base["id"])
-        self.config.base_id = base["id"]
-        return base["id"]
+
+        if self.config.should_duplicate_source_base:
+            base_id = self._duplicate_source_base(client)
+        else:
+            # Always create a fresh base rather than adopting a same-titled one:
+            # event names are not unique, and adopting another event's base would
+            # silently merge both events into one participants table.
+            base = client.create_base(title, workspace_id=self.config.workspace_id)
+            base_id = base["id"]
+
+        self._persist_setting("base_id", base_id)
+        self.config.base_id = base_id
+        return base_id
+
+    def _duplicate_source_base(self, client: NocoDBClient) -> str:
+        # Structure-only copy (excludeData) of the base the source event uses,
+        # keeping its views and hand-added columns. NocoDB returns the new base
+        # id synchronously; the copy itself finishes in a background job.
+        result = client.duplicate_base(
+            self.config.source_base_id, exclude_data=True, exclude_views=False
+        )
+        base_id = result.get("base_id") or result.get("id")
+        if not base_id:
+            raise NocoDBAPIError(
+                f"NocoDB base duplication of {self.config.source_base_id} returned no base id"
+            )
+        # Persist immediately so a crash while the copy job runs does not lead to
+        # a second duplication on the next attempt.
+        self._persist_setting("base_id", base_id)
+        self.config.base_id = base_id
+        self._wait_for_participants_table(client, base_id)
+        return base_id
+
+    def _wait_for_participants_table(self, client: NocoDBClient, base_id: str) -> None:
+        for attempt in range(BASE_DUPLICATION_MAX_ATTEMPTS):
+            tables = client.list_tables(base_id)
+            if any(table.get("title") == TABLE_PARTICIPANTS for table in tables):
+                return
+            if attempt < BASE_DUPLICATION_MAX_ATTEMPTS - 1:
+                time.sleep(BASE_DUPLICATION_POLL_INTERVAL)
+        # The copy job did not surface the table in time. Reconciliation below
+        # still works: it creates a participants table if none is found.
 
     def _ensure_participants_table(self, base_id: str) -> str:
         client = self._get_client()

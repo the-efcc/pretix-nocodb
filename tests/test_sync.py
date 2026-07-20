@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 from pretix.base.models import (
+    Event,
     Item,
     ItemVariation,
     Order,
@@ -50,6 +51,59 @@ class FakeNocoDBClient:
         self.base_counter += 1
         self.bases.append(base)
         return base
+
+    def duplicate_base(
+        self,
+        base_id: str,
+        *,
+        exclude_data: bool = True,
+        exclude_views: bool = False,
+    ):
+        source = next(base for base in self.bases if base["id"] == base_id)
+        new_base = self.create_base(f"{source['title']} copy")
+        new_base_id = new_base["id"]
+        for src_table in [t for t in self.tables.values() if t["base_id"] == base_id]:
+            new_table_id = f"m_{self.table_counter}"
+            self.table_counter += 1
+            col_id_map: dict[str, str] = {}
+            new_columns = []
+            for column in src_table["columns"]:
+                new_column_id = self._next_column_id()
+                col_id_map[column["id"]] = new_column_id
+                new_columns.append({**column, "id": new_column_id, "fk_model_id": new_table_id})
+            self.tables[new_table_id] = {
+                "id": new_table_id,
+                "base_id": new_base_id,
+                "title": src_table["title"],
+                "columns": new_columns,
+            }
+            self.records[new_table_id] = (
+                [] if exclude_data else [dict(r) for r in self.records[src_table["id"]]]
+            )
+            self.views[new_table_id] = []
+            source_views = self.views.get(src_table["id"], [])
+            if exclude_views:
+                # NocoDB always keeps the default view; only extra ones are dropped.
+                source_views = source_views[:1]
+            for view in source_views:
+                new_view_id = f"v_{self.view_counter}"
+                self.view_counter += 1
+                self.views[new_table_id].append({**view, "id": new_view_id})
+                self.view_columns[new_view_id] = [
+                    {
+                        "id": f"vc_{self._next_view_column_id()}",
+                        "fk_view_id": new_view_id,
+                        "fk_column_id": col_id_map.get(vc["fk_column_id"], vc["fk_column_id"]),
+                        "show": vc["show"],
+                    }
+                    for vc in self.view_columns.get(view["id"], [])
+                ]
+        return {"id": f"job_{new_base_id}", "base_id": new_base_id}
+
+    def _next_view_column_id(self) -> int:
+        value = self.view_column_counter
+        self.view_column_counter += 1
+        return value
 
     def list_tables(self, base_id: str, *, _page_size: int = 200):
         return [
@@ -1140,6 +1194,67 @@ def test_sync_ignores_participants_table_from_a_different_base(event, order):
     # The old base's table is left untouched; rows land in the new base only.
     assert len(client.records[old_table_id]) == 1
     assert len(client.records[new_table_id]) == 1
+
+
+def test_sync_duplicates_source_base_instead_of_creating(event, order):
+    client = FakeNocoDBClient()
+
+    # The first event owns a "template" base: run a sync so it exists, then give
+    # its participants table a hand-added column and a data row.
+    item = Item.objects.create(event=event, name="Regular", default_price=Decimal("10"))
+    OrderPosition.objects.create(order=order, item=item, price=Decimal("10"))
+    NocoDBSyncService(event, client=client).sync_order(order)
+
+    template_base_id = event.settings.get("plugin_nocodb_base_id")
+    template_table = next(t for t in client.tables.values() if t["base_id"] == template_base_id)
+    client.create_column(
+        template_table["id"],
+        {"title": "Extra", "column_name": "extra_custom", "uidt": "SingleLineText"},
+    )
+    assert len(client.records[template_table["id"]]) == 1
+
+    # A copied event points at that base and opts to duplicate it.
+    copy = Event.objects.create(
+        organizer=event.organizer,
+        name="Copy",
+        slug="copy",
+        date_from=event.date_from,
+        live=True,
+        plugins="pretix_nocodb",
+    )
+    copy.settings.set("plugin_nocodb_enabled", True)
+    copy.settings.set("plugin_nocodb_api_url", "https://app.nocodb.test")
+    copy.settings.set("plugin_nocodb_api_token", "test-secret")
+    copy.settings.set("plugin_nocodb_source_base_id", template_base_id)
+    copy.settings.set("plugin_nocodb_base_creation_mode", "duplicate")
+
+    NocoDBSyncService(copy, client=client).sync_schema()
+
+    new_base_id = copy.settings.get("plugin_nocodb_base_id")
+    assert new_base_id
+    assert new_base_id != template_base_id
+
+    new_tables = [t for t in client.tables.values() if t["base_id"] == new_base_id]
+    # The participants table is adopted from the duplicate, not created anew.
+    assert len(new_tables) == 1
+    new_table = new_tables[0]
+    assert new_table["title"] == TABLE_PARTICIPANTS
+    assert copy.settings.get("plugin_nocodb_participants_table_id") == new_table["id"]
+    # The hand-added column carried over from the template...
+    assert any(c["column_name"] == "extra_custom" for c in new_table["columns"])
+    # ...but the template's data did not (structure-only duplication).
+    assert client.records[new_table["id"]] == []
+
+
+def test_sync_creates_fresh_base_when_duplicate_mode_has_no_source(event):
+    # Duplicate mode selected but no source base recorded: fall back to creating.
+    event.settings.set("plugin_nocodb_base_creation_mode", "duplicate")
+
+    client = FakeNocoDBClient()
+    NocoDBSyncService(event, client=client).sync_schema()
+
+    assert len(client.bases) == 1
+    assert client.bases[0]["title"] == str(event.name)
 
 
 def test_sync_skips_when_disabled(event, order):

@@ -11,6 +11,7 @@ from pretix.base.models import Item, ItemVariation, Question, QuestionOption
 from pretix.base.signals import (
     checkin_annulled,
     checkin_created,
+    event_copy_data,
     order_approved,
     order_canceled,
     order_changed,
@@ -23,9 +24,9 @@ from pretix.base.signals import (
     order_placed,
     order_reactivated,
 )
-from pretix.control.signals import nav_event_settings
+from pretix.control.signals import nav_event_settings, nav_organizer
 
-from .plugin_settings import NocoDBConfig
+from .plugin_settings import NocoDBConfig, settings_for_event
 from .tasks import delete_order_from_nocodb, sync_event_schema, sync_order_to_nocodb
 
 QUESTION_ITEMS_THROUGH = cast(Any, Question.items).through
@@ -123,6 +124,39 @@ def sync_schema_on_item_change(sender, instance: Item, **kwargs) -> None:
 def sync_schema_on_item_variation_change(sender, instance: ItemVariation, **kwargs) -> None:
     item = cast(Any, instance.item)
     _enqueue_schema_sync(item.event)
+
+
+@receiver(event_copy_data, dispatch_uid="nocodb_event_copy_data")
+def record_source_base_on_copy(sender, other, **kwargs) -> None:
+    # `sender` is the freshly created event, `other` the one it was copied from.
+    # Remember the source event's base so the settings page can offer to
+    # duplicate its structure instead of building a base from scratch. The
+    # source's base/table ids themselves are intentionally not copied: the
+    # duplicated base gets its own ids, discovered on the first sync.
+    source_base_id = settings_for_event(other).get("base_id", default="")
+    if source_base_id:
+        settings_for_event(sender).set("source_base_id", source_base_id)
+
+
+@receiver(nav_organizer, dispatch_uid="nocodb_nav_organizer")
+def add_organizer_settings_nav(sender, request, organizer, **kwargs):
+    if not request.user.has_organizer_permission(
+        organizer, "organizer.settings.general:write", request=request
+    ):
+        return []
+    url = resolve(request.path_info)
+    return [
+        {
+            "label": _("NocoDB"),
+            "url": reverse(
+                "plugins:pretix_nocodb:organizer.settings",
+                kwargs={"organizer": organizer.slug},
+            ),
+            "active": url.namespace == "plugins:pretix_nocodb"
+            and url.url_name == "organizer.settings",
+            "icon": "database",
+        }
+    ]
 
 
 @receiver(nav_event_settings, dispatch_uid="nocodb_nav_event_settings")

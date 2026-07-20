@@ -130,6 +130,29 @@ class NocoDBClient:
             payload["fk_workspace_id"] = workspace_id
         return self._request("POST", path, json=payload)
 
+    def duplicate_base(
+        self,
+        base_id: str,
+        *,
+        exclude_data: bool = True,
+        exclude_views: bool = False,
+        exclude_hooks: bool = True,
+    ) -> dict[str, Any]:
+        # NocoDB creates the destination base synchronously and returns its id
+        # right away (`base_id`), then copies the schema/views/records in a
+        # background job (`id`). With exclude_data the copy is structure-only.
+        return self._request(
+            "POST",
+            f"/api/v2/meta/duplicate/{base_id}",
+            json={
+                "options": {
+                    "excludeData": exclude_data,
+                    "excludeViews": exclude_views,
+                    "excludeHooks": exclude_hooks,
+                }
+            },
+        )
+
     def list_tables(self, base_id: str, *, page_size: int = 200) -> list[dict[str, Any]]:
         response = self._request(
             "GET",

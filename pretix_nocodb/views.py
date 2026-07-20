@@ -5,13 +5,27 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from django.views import View
-from pretix.base.models import Event
+from pretix.base.models import Event, Organizer
 from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.control.views.event import EventSettingsFormView, EventSettingsViewMixin
+from pretix.control.views.organizer import OrganizerSettingsFormView
 
-from .forms import NocoDBSettingsForm
+from .forms import NocoDBSettingsForm, OrganizerNocoDBSettingsForm
 from .plugin_settings import NocoDBConfig
 from .tasks import sync_all_orders_to_nocodb
+
+
+class NocoDBOrganizerSettingsView(OrganizerSettingsFormView):
+    model = Organizer
+    form_class = OrganizerNocoDBSettingsForm
+    template_name = "pretix_nocodb/organizer_settings.html"
+    permission = "organizer.settings.general:write"
+
+    def get_success_url(self) -> str:
+        return reverse(
+            "plugins:pretix_nocodb:organizer.settings",
+            kwargs={"organizer": self.request.organizer.slug},
+        )
 
 
 class NocoDBSettingsView(EventSettingsViewMixin, EventSettingsFormView):

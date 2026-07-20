@@ -1,0 +1,26 @@
+{% extends "pretixcontrol/base.html" %}
+{% load i18n %}
+{% load bootstrap3 %}
+{% block title %}{% trans "NocoDB" %}{% endblock %}
+{% block content %}
+    <h1>{% trans "NocoDB" %}</h1>
+    <p>
+        {% blocktrans trimmed %}
+            Configure the NocoDB instance to sync your events to. These credentials
+            are shared by every event of this organizer; each event decides whether
+            to sync and which base to use on its own NocoDB settings page.
+        {% endblocktrans %}
+    </p>
+    <form action="{% url "plugins:pretix_nocodb:organizer.settings" organizer=request.organizer.slug %}" method="post" class="form-horizontal">
+        {% csrf_token %}
+        {% bootstrap_form_errors form %}
+        {% bootstrap_field form.plugin_nocodb_api_url layout="horizontal" %}
+        {% bootstrap_field form.plugin_nocodb_api_token layout="horizontal" %}
+        {% bootstrap_field form.plugin_nocodb_workspace_id layout="horizontal" %}
+        <div class="form-group submit-group">
+            <button type="submit" class="btn btn-primary btn-save">
+                {% trans "Save" %}
+            </button>
+        </div>
+    </form>
+{% endblock %}
