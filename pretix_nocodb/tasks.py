@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, NoReturn
 
 from django_scopes import scopes_disabled
@@ -10,7 +11,22 @@ from pretix.celery_app import app
 from .client import NocoDBAPIError
 from .sync import NocoDBSyncService
 
+logger = logging.getLogger(__name__)
+
 MAX_RETRY_DELAY = 300
+
+
+def _known_position_ids(event) -> set[int]:
+    # sync_order writes a row for every position in order.all_positions, canceled
+    # ones included, so the reconciliation snapshot has to use the same unfiltered
+    # set. OrderPosition.objects is pretix' ActivePositionManager (canceled=False);
+    # using it here makes prune_deleted_rows delete the rows sync_order has just
+    # written for canceled positions, and any column added by hand in NocoDB goes
+    # with them. OrderPosition.all is the manager that keeps them.
+    with scopes_disabled():
+        return set(
+            OrderPosition.all.filter(order__event=event).values_list("pk", flat=True)
+        )
 
 
 def _retry_if_transient(task: Any, exc: NocoDBAPIError) -> NoReturn:
@@ -71,12 +87,20 @@ def sync_all_orders_to_nocodb(self, event) -> None:
             orders = list(Order.objects.filter(event=event))
         for order in orders:
             service.sync_order(order, schema=schema)
-        # Snapshot the active positions after the sync loop so orders placed
+        # Snapshot the known positions after the sync loop so orders placed
         # while it ran (and synced concurrently) are not pruned as stale.
-        with scopes_disabled():
-            position_ids = set(
-                OrderPosition.objects.filter(order__event=event).values_list("pk", flat=True)
+        position_ids = _known_position_ids(event)
+        if orders and not position_ids:
+            # Every order of the event losing every position at once is far more
+            # likely a broken query than real data. Pruning on that snapshot
+            # empties the participants table and destroys whatever was added to
+            # those rows in NocoDB; leaving stale rows behind is recoverable.
+            logger.warning(
+                "Skipping NocoDB prune for event %s: %d orders but no positions found",
+                event.slug,
+                len(orders),
             )
+            return
         service.prune_deleted_rows(active_position_ids=position_ids)
     except NocoDBAPIError as exc:
         _retry_if_transient(self, exc)
