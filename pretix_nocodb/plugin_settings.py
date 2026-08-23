@@ -20,12 +20,24 @@ _DEFAULTS = {
     "plugin_nocodb_workspace_id": ("", str),
     "plugin_nocodb_base_id": ("", str),
     "plugin_nocodb_participants_table_id": ("", str),
+    "plugin_nocodb_participants_view_defaults_view_id": ("", str),
     # Base of the event this one was copied from (recorded on event copy). When
     # set, the event may duplicate that base's structure instead of starting
     # from scratch.
     "plugin_nocodb_source_base_id": ("", str),
     "plugin_nocodb_base_creation_mode": (BASE_MODE_NEW, str),
 }
+
+# Settings that tie an event to one concrete NocoDB base. They are discovered
+# (or created) on the first sync and are only ever valid for the event that owns
+# them, so they must be cleared whenever an event is copied: pretix copies the
+# whole settings store of the source event, which would otherwise make the copy
+# sync into -- and reconcile the schema of -- the source's base.
+BASE_BINDING_SETTINGS = (
+    "base_id",
+    "participants_table_id",
+    "participants_view_defaults_view_id",
+)
 
 
 def register_settings_defaults() -> None:
@@ -39,6 +51,12 @@ def settings_for_event(event) -> SettingsSandbox:
 
 def settings_for_organizer(organizer) -> SettingsSandbox:
     return SettingsSandbox(*PLUGIN_SETTINGS_PREFIX, organizer)
+
+
+def clear_base_binding(event) -> None:
+    settings = settings_for_event(event)
+    for key in BASE_BINDING_SETTINGS:
+        settings.set(key, "")
 
 
 @dataclass(slots=True)

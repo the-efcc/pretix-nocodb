@@ -26,7 +26,12 @@ from pretix.base.signals import (
 )
 from pretix.control.signals import nav_event_settings, nav_organizer
 
-from .plugin_settings import NocoDBConfig, settings_for_event
+from .plugin_settings import (
+    BASE_MODE_DUPLICATE,
+    NocoDBConfig,
+    clear_base_binding,
+    settings_for_event,
+)
 from .tasks import delete_order_from_nocodb, sync_event_schema, sync_order_to_nocodb
 
 QUESTION_ITEMS_THROUGH = cast(Any, Question.items).through
@@ -127,15 +132,26 @@ def sync_schema_on_item_variation_change(sender, instance: ItemVariation, **kwar
 
 
 @receiver(event_copy_data, dispatch_uid="nocodb_event_copy_data")
-def record_source_base_on_copy(sender, other, **kwargs) -> None:
+def reset_base_binding_on_copy(sender, other, **kwargs) -> None:
     # `sender` is the freshly created event, `other` the one it was copied from.
-    # Remember the source event's base so the settings page can offer to
-    # duplicate its structure instead of building a base from scratch. The
-    # source's base/table ids themselves are intentionally not copied: the
-    # duplicated base gets its own ids, discovered on the first sync.
+    #
+    # Event.copy_data_from() copies every settings row of the source event and
+    # only then sends this signal, so the copy arrives here bound to the source
+    # event's base and participants table. Left in place, the copy would sync
+    # its participants into the source's table and reconcile that table's
+    # schema and default view against its own questions and items.
+    #
+    # Drop the binding so the copy provisions a base of its own on its first
+    # sync, and remember the source's base: an event copy almost always wants
+    # the structure it was copied from, so preselect duplicating that base.
+    # The settings page still offers "create a new empty base" instead.
+    clear_base_binding(sender)
+
     source_base_id = settings_for_event(other).get("base_id", default="")
     if source_base_id:
-        settings_for_event(sender).set("source_base_id", source_base_id)
+        settings = settings_for_event(sender)
+        settings.set("source_base_id", source_base_id)
+        settings.set("base_creation_mode", BASE_MODE_DUPLICATE)
 
 
 @receiver(nav_organizer, dispatch_uid="nocodb_nav_organizer")
