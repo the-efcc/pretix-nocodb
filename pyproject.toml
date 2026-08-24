@@ -38,7 +38,9 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-django>=4.0",
     "pretix>=2026.3.0",
-    "ty>=0.0.29",
+    # Pinned: [tool.ty.rules] turns every rule into an error, so a new ty
+    # release can fail CI without a single commit. Bump deliberately.
+    "ty==0.0.74",
     "ruff>=0.1",
     "commitizen>=4.9.1",
 ]
@@ -77,6 +79,12 @@ python-version = "3.11"
 all = "error"
 # @typing.override requires Python >= 3.12; this plugin still supports 3.11.
 missing-override-decorator = "ignore"
+# Django's @receiver and celery's @app.task are untyped decorators, so ty cannot
+# see through them to the function they wrap.
+dynamic-function-decorator-return = "ignore"
+# django.urls.reverse() and the i18n helpers are inferred as `Unknown`, which ty
+# accepts as an assignment but not as a subtype of the declared return type.
+unsound-return-statement = "ignore"
 
 [tool.ruff]
 line-length = 100
