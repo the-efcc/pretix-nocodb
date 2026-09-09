@@ -464,12 +464,18 @@ class NocoDBSyncService:
         # NocoDB clears the cell value from every record whose option is
         # removed, which would destroy historical data (e.g. positions bought
         # for a since-deleted item).
-        existing = [
-            option
-            for option in (column.get("colOptions") or {}).get("options", [])
-            if option.get("title")
-        ]
-        existing_titles = {str(option["title"]) for option in existing}
+        # Options whose title is already taken are dropped: NocoDB rejects the
+        # whole update with "Duplicates are not allowed!", so echoing back a
+        # column that somehow ended up with two identically titled options
+        # would wedge every later schema sync.
+        existing: list[dict[str, Any]] = []
+        existing_titles: set[str] = set()
+        for option in (column.get("colOptions") or {}).get("options", []):
+            title = str(option.get("title") or "")
+            if not title or title in existing_titles:
+                continue
+            existing_titles.add(title)
+            existing.append(option)
         return existing + [
             option for option in desired_options if option["title"] not in existing_titles
         ]

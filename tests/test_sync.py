@@ -15,6 +15,7 @@ from pretix.base.models import (
     QuestionOption,
 )
 
+from pretix_nocodb.client import NocoDBAPIError
 from pretix_nocodb.sync import (
     EVENT_FIELD,
     MAX_COLUMN_TITLE_LENGTH,
@@ -150,7 +151,20 @@ class FakeNocoDBClient:
             return "Id"
         return self._column_aliases(table_id).get(field, field)
 
+    def _reject_duplicate_options(self, payload: dict):
+        titles = [
+            str(option.get("title"))
+            for option in (payload.get("colOptions") or {}).get("options", [])
+        ]
+        if len(titles) != len(set(titles)):
+            raise NocoDBAPIError(
+                "NocoDB API error: HTTP 400 - Duplicates are not allowed!",
+                status_code=400,
+                payload={"msg": "Duplicates are not allowed!"},
+            )
+
     def create_column(self, table_id: str, column: dict):
+        self._reject_duplicate_options(column)
         created = {
             "id": self._next_column_id(),
             "fk_model_id": table_id,
@@ -178,6 +192,7 @@ class FakeNocoDBClient:
         return created
 
     def update_column(self, column_id: str, payload: dict):
+        self._reject_duplicate_options(payload)
         for table in self.tables.values():
             for column in table["columns"]:
                 if column["id"] == column_id:
@@ -707,6 +722,69 @@ def test_sync_keeps_select_options_for_removed_items(event):
         "Early bird",
         "Regular",
     ]
+
+
+def test_sync_drops_select_options_duplicated_in_nocodb(event):
+    item = Item.objects.create(event=event, name="Conference ticket", default_price=Decimal("8"))
+    ItemVariation.objects.create(item=item, value="Sunday & Monday nights")
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    service.sync_schema()
+
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    variation_column = next(
+        column
+        for column in participants_table["columns"]
+        if column.get("column_name") == "variation_name"
+    )
+    # NocoDB handed the option back a second time under its own id; sending it
+    # back as-is is what NocoDB then rejects as a duplicate.
+    options = variation_column["colOptions"]["options"]
+    options.append({**options[0], "id": "duplicate"})
+
+    ItemVariation.objects.create(item=item, value="Friday & Saturday nights")
+    service.sync_schema()
+
+    assert [opt["title"] for opt in variation_column["colOptions"]["options"]] == [
+        "Sunday & Monday nights",
+        "Friday & Saturday nights",
+    ]
+
+
+def test_sync_drops_question_options_duplicated_in_nocodb(event):
+    question = Question.objects.create(
+        event=event,
+        question="T-Shirt size",
+        type=Question.TYPE_CHOICE,
+        required=False,
+        identifier="TSHIRT",
+    )
+    QuestionOption.objects.create(question=question, identifier="SZ_S", answer="S")
+
+    client = FakeNocoDBClient()
+    _attach_base(event, client)
+    service = NocoDBSyncService(event, client=client)
+    service.sync_schema()
+
+    participants_table = next(
+        table for table in client.tables.values() if table["title"] == TABLE_PARTICIPANTS
+    )
+    question_column = next(
+        column
+        for column in participants_table["columns"]
+        if column.get("column_name") == "q_TSHIRT"
+    )
+    options = question_column["colOptions"]["options"]
+    options.append({**options[0], "id": "duplicate"})
+
+    QuestionOption.objects.create(question=question, identifier="SZ_M", answer="M")
+    service.sync_schema()
+
+    assert [opt["title"] for opt in question_column["colOptions"]["options"]] == ["S", "M"]
 
 
 def test_sync_keeps_choice_options_removed_from_question(event):
