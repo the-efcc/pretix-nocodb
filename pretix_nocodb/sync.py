@@ -113,7 +113,8 @@ class NocoDBSyncService:
         if not self.config.can_sync or self.client is None:
             return None
 
-        base_id = self._ensure_base()
+        base_id = self.ensure_base()
+        self._await_duplicated_base(base_id)
         participants_table_id = self._ensure_participants_table(base_id)
         participants_table = self._fetch_table_state(participants_table_id)
         participants_table = self._ensure_static_columns(participants_table, PARTICIPANTS_COLUMNS)
@@ -235,7 +236,13 @@ class NocoDBSyncService:
 
         self._delete_record_ids(self.config.participants_table_id, stale_participant_ids)
 
-    def _ensure_base(self) -> str:
+    def ensure_base(self) -> str:
+        """Return the event's base, provisioning and persisting one if needed.
+
+        Public because the settings page provisions the base up front when the
+        user asks for a sync: the id then shows up in the form right away
+        instead of only once the background sync got around to persisting it.
+        """
         if self.config.base_id:
             return self.config.base_id
 
@@ -275,11 +282,22 @@ class NocoDBSyncService:
                 f"NocoDB base duplication of {self.config.source_base_id} returned no base id"
             )
         # Persist immediately so a crash while the copy job runs does not lead to
-        # a second duplication on the next attempt.
+        # a second duplication on the next attempt. The copy job outlives this
+        # call, so record that the tables are still on their way: waiting for
+        # them here would block whoever asked for the base (the settings page
+        # included) for as long as NocoDB takes to copy it.
         self._persist_setting("base_id", base_id)
         self.config.base_id = base_id
-        self._wait_for_participants_table(client, base_id)
+        self._persist_setting("base_duplication_pending", True)
+        self.config.base_duplication_pending = True
         return base_id
+
+    def _await_duplicated_base(self, base_id: str) -> None:
+        if not self.config.base_duplication_pending:
+            return
+        self._wait_for_participants_table(self._get_client(), base_id)
+        self._persist_setting("base_duplication_pending", False)
+        self.config.base_duplication_pending = False
 
     def _wait_for_participants_table(self, client: NocoDBClient, base_id: str) -> None:
         for attempt in range(BASE_DUPLICATION_MAX_ATTEMPTS):
@@ -864,7 +882,7 @@ class NocoDBSyncService:
     def _event_tag(self) -> str:
         return f"{self.event.organizer.slug}/{self.event.slug}"
 
-    def _persist_setting(self, key: str, value: str) -> None:
+    def _persist_setting(self, key: str, value: str | bool) -> None:
         settings_for_event(self.event).set(key, value)
 
     def _where_equals(self, field: str, value: Any) -> str:

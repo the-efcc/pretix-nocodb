@@ -26,6 +26,9 @@ _DEFAULTS = {
     # from scratch.
     "plugin_nocodb_source_base_id": ("", str),
     "plugin_nocodb_base_creation_mode": (BASE_MODE_NEW, str),
+    # Set while NocoDB's background copy job of a duplicated base is still
+    # running, so the sync that adopts the copied tables knows to wait for them.
+    "plugin_nocodb_base_duplication_pending": ("False", bool),
 }
 
 # Settings that tie an event to one concrete NocoDB base. They are discovered
@@ -37,6 +40,7 @@ BASE_BINDING_SETTINGS = (
     "base_id",
     "participants_table_id",
     "participants_view_defaults_view_id",
+    "base_duplication_pending",
 )
 
 
@@ -69,6 +73,7 @@ class NocoDBConfig:
     participants_table_id: str
     source_base_id: str
     base_creation_mode: str
+    base_duplication_pending: bool
 
     @classmethod
     def from_event(cls, event) -> NocoDBConfig:
@@ -82,6 +87,9 @@ class NocoDBConfig:
             participants_table_id=settings.get("participants_table_id", default=""),
             source_base_id=settings.get("source_base_id", default=""),
             base_creation_mode=settings.get("base_creation_mode", default=BASE_MODE_NEW),
+            base_duplication_pending=settings.get(
+                "base_duplication_pending", as_type=bool, default=False
+            ),
         )
 
     @property

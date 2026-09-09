@@ -41,12 +41,15 @@ def test_copy_does_not_inherit_the_source_base(event):
     event.settings.set("plugin_nocodb_base_id", "p_template")
     event.settings.set("plugin_nocodb_participants_table_id", "m_participants")
     event.settings.set("plugin_nocodb_participants_view_defaults_view_id", "v_all")
+    event.settings.set("plugin_nocodb_base_duplication_pending", True)
     copy = _copy_of(event, "copy")
 
     config = NocoDBConfig.from_event(copy)
     assert config.base_id == ""
     assert config.participants_table_id == ""
     assert copy.settings.get("plugin_nocodb_participants_view_defaults_view_id") == ""
+    # The copy has no base yet, so it cannot be waiting for one to be copied.
+    assert config.base_duplication_pending is False
     # The source keeps its own base.
     assert NocoDBConfig.from_event(event).base_id == "p_template"
 
