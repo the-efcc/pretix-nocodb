@@ -41,7 +41,8 @@ class NocoDBSettingsForm(SettingsForm):
         help_text=_(
             "Optional. ID of an existing NocoDB base to sync this event's data "
             "into. Leave empty to let the plugin provision a base for this event "
-            "automatically on the next sync."
+            "automatically on the next sync. Once a base is set, emptying this "
+            "field does not unbind it: paste another base ID to move the event."
         ),
         required=False,
     )
@@ -70,3 +71,14 @@ class NocoDBSettingsForm(SettingsForm):
         has_base = bool(settings.get("plugin_nocodb_base_id", default=""))
         if not has_source or has_base:
             self.fields.pop("plugin_nocodb_base_creation_mode")
+
+    def clean_plugin_nocodb_base_id(self) -> str:
+        # An empty field means "provision one for me", never "forget the base
+        # this event is already synced into". The page is regularly rendered
+        # while the id is not stored yet -- the first sync is still running --
+        # and saving such a page back would clear the binding, leaving the base
+        # orphaned and making the next sync create a second one.
+        submitted = (self.cleaned_data.get("plugin_nocodb_base_id") or "").strip()
+        if submitted:
+            return submitted
+        return cast(Any, self.obj).settings.get("plugin_nocodb_base_id", default="")
