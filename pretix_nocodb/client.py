@@ -51,11 +51,16 @@ def _parse_retry_after(value: str | None) -> int | None:
         return None
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, repr=False)
 class NocoDBClient:
     base_url: str
     api_token: str
     session: requests.Session | None = None
+
+    def __repr__(self) -> str:
+        # The generated repr would put the API token in every Sentry frame that
+        # has a client in its locals.
+        return f"{type(self).__name__}(base_url={self.base_url!r}, api_token='***')"
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")

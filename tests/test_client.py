@@ -94,6 +94,16 @@ def test_network_error_is_wrapped_and_transient():
     assert excinfo.value.is_transient
 
 
+def test_repr_hides_the_api_token():
+    session = StubSession(response=_response(200))
+    client = NocoDBClient("https://app.nocodb.test", "nc_pat_secret", session=session)
+
+    rendered = repr(client)
+
+    assert "nc_pat_secret" not in rendered
+    assert rendered == "NocoDBClient(base_url='https://app.nocodb.test', api_token='***')"
+
+
 def test_successful_request_returns_json():
     session = StubSession(response=_response(200, content=b'{"list": [{"id": "m_1"}]}'))
 
