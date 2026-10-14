@@ -5,11 +5,13 @@ from django.utils.timezone import now
 from pretix.base.models import Event
 
 from pretix_nocodb.forms import NocoDBSettingsForm
+from pretix_nocodb.locking import SCHEMA_DEBOUNCE_DELAY, release_schema_sync_claim
 from pretix_nocodb.plugin_settings import (
     BASE_MODE_DUPLICATE,
     BASE_MODE_NEW,
     NocoDBConfig,
 )
+from pretix_nocodb.signals import _dispatch_schema_sync
 
 pytestmark = pytest.mark.django_db
 
@@ -93,3 +95,47 @@ def test_config_should_duplicate_requires_mode_and_source(event):
     # Mode set but no source recorded.
     event.settings.set("plugin_nocodb_source_base_id", "")
     assert NocoDBConfig.from_event(event).should_duplicate_source_base is False
+
+
+def test_a_burst_of_edits_enqueues_one_schema_sync(real_cache, monkeypatch):
+    # Saving a question with ten options fires a post_save per option. Each one
+    # used to enqueue its own sync_event_schema, and those then raced each
+    # other's select-column writes inside NocoDB.
+    enqueued: list[dict] = []
+    monkeypatch.setattr(
+        "pretix_nocodb.signals.sync_event_schema.apply_async",
+        lambda **kwargs: enqueued.append(kwargs),
+    )
+
+    for _ in range(11):
+        _dispatch_schema_sync(34)
+
+    assert enqueued == [{"kwargs": {"event": 34}, "countdown": SCHEMA_DEBOUNCE_DELAY}]
+
+
+def test_each_event_debounces_on_its_own(real_cache, monkeypatch):
+    enqueued: list[dict] = []
+    monkeypatch.setattr(
+        "pretix_nocodb.signals.sync_event_schema.apply_async",
+        lambda **kwargs: enqueued.append(kwargs),
+    )
+
+    _dispatch_schema_sync(34)
+    _dispatch_schema_sync(35)
+
+    assert [call["kwargs"]["event"] for call in enqueued] == [34, 35]
+
+
+def test_an_edit_after_the_claim_is_released_enqueues_again(real_cache, monkeypatch):
+    enqueued: list[dict] = []
+    monkeypatch.setattr(
+        "pretix_nocodb.signals.sync_event_schema.apply_async",
+        lambda **kwargs: enqueued.append(kwargs),
+    )
+
+    _dispatch_schema_sync(34)
+    # What the task does when it starts running.
+    release_schema_sync_claim(34)
+    _dispatch_schema_sync(34)
+
+    assert len(enqueued) == 2

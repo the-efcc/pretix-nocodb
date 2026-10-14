@@ -4,7 +4,8 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
-from django.test import RequestFactory
+from django.core.cache import cache
+from django.test import RequestFactory, override_settings
 from django.utils import translation
 from django.utils.timezone import now
 from django_scopes import scopes_disabled
@@ -42,6 +43,25 @@ def disable_scopes():
 @pytest.fixture
 def rf():
     return RequestFactory()
+
+
+# Caching
+
+
+@pytest.fixture
+def real_cache():
+    """A cache backend that actually stores what it is given.
+
+    The suite otherwise runs on a dummy cache whose ``add()`` always reports
+    success, which is precisely the behaviour the schema-sync lock needs a real
+    backend to test against.
+    """
+    with override_settings(
+        CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+    ):
+        cache.clear()
+        yield cache
+        cache.clear()
 
 
 # Database fixtures

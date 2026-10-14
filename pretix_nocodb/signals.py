@@ -26,6 +26,7 @@ from pretix.base.signals import (
 )
 from pretix.control.signals import nav_event_settings, nav_organizer
 
+from .locking import SCHEMA_DEBOUNCE_DELAY, claim_schema_sync
 from .plugin_settings import (
     BASE_MODE_DUPLICATE,
     NocoDBConfig,
@@ -44,7 +45,20 @@ def _event_is_sync_enabled(event) -> bool:
 def _enqueue_schema_sync(event) -> None:
     if not _event_is_sync_enabled(event):
         return
-    transaction.on_commit(lambda: sync_event_schema.apply_async(kwargs={"event": event.pk}))
+    transaction.on_commit(lambda: _dispatch_schema_sync(event.pk))
+
+
+def _dispatch_schema_sync(event_id: int) -> None:
+    # Saving one question fires a post_save per option, so a single edit used to
+    # enqueue N+1 identical tasks that then raced each other's writes inside
+    # NocoDB. The first claim wins and runs once the burst has settled; the task
+    # reloads the event, so the duplicates we drop would have written the same
+    # schema anyway.
+    if not claim_schema_sync(event_id):
+        return
+    sync_event_schema.apply_async(
+        kwargs={"event": event_id}, countdown=SCHEMA_DEBOUNCE_DELAY
+    )
 
 
 def _enqueue_order_sync(order) -> None:

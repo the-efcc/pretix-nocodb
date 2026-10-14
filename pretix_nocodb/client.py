@@ -8,6 +8,13 @@ import requests
 PAYLOAD_SUMMARY_LENGTH = 500
 TRANSIENT_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
+# NocoDB reports a Postgres unique violation as a plain 400 carrying the SQLSTATE.
+# Concurrent writes to the same select column produce one -- they collide on the
+# primary key of the table holding the options -- and those are worth retrying. A
+# genuinely duplicate write lands here too and burns its retries before
+# surfacing, which only delays an error that was going to be raised either way.
+UNIQUE_VIOLATION_CODE = "23505"
+
 
 class NocoDBAPIError(RuntimeError):
     def __init__(
@@ -27,7 +34,15 @@ class NocoDBAPIError(RuntimeError):
     def is_transient(self) -> bool:
         # status_code None means the request never got an HTTP response
         # (connection error, timeout), which is worth retrying too.
-        return self.status_code is None or self.status_code in TRANSIENT_STATUS_CODES
+        if self.status_code is None or self.status_code in TRANSIENT_STATUS_CODES:
+            return True
+        return self.is_write_conflict
+
+    @property
+    def is_write_conflict(self) -> bool:
+        if not isinstance(self.payload, dict):
+            return False
+        return str(self.payload.get("code")) == UNIQUE_VIOLATION_CODE
 
 
 def _summarize_payload(payload: Any) -> str:

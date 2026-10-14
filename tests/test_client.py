@@ -83,6 +83,46 @@ def test_auth_error_is_not_transient():
     assert excinfo.value.retry_after is None
 
 
+def test_concurrent_select_column_write_is_transient():
+    # What NocoDB answers when two schema syncs rewrite the same select column:
+    # a 400 wrapping the Postgres unique violation on the option table.
+    session = StubSession(
+        response=_response(
+            400,
+            content=(
+                b'{"code": "23505", "error": "ERR_DATABASE_OP_FAILED", "message":'
+                b" \"base_id field unique constraint violation. Value 'pbase,"
+                b" sopt' already exists.\"}"
+            ),
+        ),
+    )
+
+    with pytest.raises(NocoDBAPIError) as excinfo:
+        _client(session).update_column("ccol", {"title": "Variation name"})
+
+    assert excinfo.value.is_write_conflict
+    assert excinfo.value.is_transient
+
+
+def test_other_bad_requests_stay_non_transient():
+    session = StubSession(response=_response(400, content=b'{"msg": "Invalid column type"}'))
+
+    with pytest.raises(NocoDBAPIError) as excinfo:
+        _client(session).update_column("ccol", {"uidt": "Nonsense"})
+
+    assert not excinfo.value.is_write_conflict
+    assert not excinfo.value.is_transient
+
+
+def test_non_json_error_body_is_not_a_write_conflict():
+    session = StubSession(response=_response(400, content=b"23505"))
+
+    with pytest.raises(NocoDBAPIError) as excinfo:
+        _client(session).update_column("ccol", {"title": "Variation name"})
+
+    assert not excinfo.value.is_write_conflict
+
+
 def test_network_error_is_wrapped_and_transient():
     session = StubSession(exc=requests.ConnectionError("connection refused"))
 
