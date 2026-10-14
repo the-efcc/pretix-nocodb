@@ -17,6 +17,14 @@
             and the plugin will only create a participants table inside it.
         {% endblocktrans %}
     </p>
+    {% comment %}
+        Forms cannot nest, so the sync POST lives in its own form and the button
+        in the submit group below reaches it through its id. That keeps "Sync now"
+        in the same footer bar as "Save" instead of stranded underneath it.
+    {% endcomment %}
+    <form id="nocodb-sync-now" action="{% url "plugins:pretix_nocodb:sync" organizer=request.event.organizer.slug event=request.event.slug %}" method="post" hidden>
+        {% csrf_token %}
+    </form>
     <form action="" method="post" class="form-horizontal">
         {% csrf_token %}
         {% bootstrap_form_errors form %}
@@ -25,26 +33,23 @@
         {% if form.plugin_nocodb_base_creation_mode %}
             {% bootstrap_field form.plugin_nocodb_base_creation_mode layout="horizontal" %}
         {% endif %}
-        <div class="form-group submit-group">
-            <button type="submit" class="btn btn-primary btn-save">
-                {% trans "Save" %}
-            </button>
-        </div>
-    </form>
-    <form action="{% url "plugins:pretix_nocodb:sync" organizer=request.event.organizer.slug event=request.event.slug %}" method="post" class="form-horizontal">
-        {% csrf_token %}
         <div class="form-group">
             <div class="col-md-9 col-md-offset-3">
-                <button type="submit" class="btn btn-default">
-                    {% trans "Sync now" %}
-                </button>
                 <p class="help-block">
                     {% blocktrans trimmed %}
-                        Syncs every order of this event to NocoDB. This button does not
+                        "Sync now" syncs every order of this event to NocoDB. It does not
                         save the settings above, so save them first if you changed them.
                     {% endblocktrans %}
                 </p>
             </div>
+        </div>
+        <div class="form-group submit-group">
+            <button type="submit" form="nocodb-sync-now" class="btn btn-default">
+                {% trans "Sync now" %}
+            </button>
+            <button type="submit" class="btn btn-primary btn-save">
+                {% trans "Save" %}
+            </button>
         </div>
     </form>
 {% endblock %}

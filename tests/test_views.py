@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from django.test import Client
+from pretix.base.models import Team, User
 
 from pretix_nocodb.client import NocoDBAPIError
 from pretix_nocodb.forms import NocoDBSettingsForm
@@ -194,3 +196,42 @@ def test_settings_form_saving_a_stale_page_does_not_cause_a_second_base(rf, even
 
     assert event.settings.get("plugin_nocodb_base_id") == first_base_id
     assert len(fake_client.bases) == 1
+
+
+def _control_client(event, organizer) -> Client:
+    user = User.objects.create_user("staff@example.org", "dummypassword123")
+    team = Team.objects.create(
+        organizer=organizer,
+        all_event_permissions=True,
+        all_organizer_permissions=True,
+        all_events=True,
+    )
+    team.members.add(user)
+    client = Client()
+    assert client.login(email="staff@example.org", password="dummypassword123")
+    return client
+
+
+def test_sync_now_sits_in_the_same_button_bar_as_save(event, organizer):
+    client = _control_client(event, organizer)
+
+    response = client.get(f"/control/event/{organizer.slug}/{event.slug}/nocodb/settings")
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    # Forms cannot nest, so the button reaches its own form by id. Without that
+    # the sync form has to follow the settings form, which strands "Sync now"
+    # below the button bar instead of beside "Save".
+    assert '<form id="nocodb-sync-now"' in html
+    assert 'form="nocodb-sync-now"' in html
+    assert html.index("Sync now") < html.index("btn-save")
+
+
+def test_settings_page_renders_no_template_comments(event, organizer):
+    # Django only treats {# ... #} as a comment when it is on one line; spread
+    # over several it is emitted as visible text on the page.
+    client = _control_client(event, organizer)
+
+    response = client.get(f"/control/event/{organizer.slug}/{event.slug}/nocodb/settings")
+
+    assert "Forms cannot nest" not in response.content.decode()
