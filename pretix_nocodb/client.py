@@ -150,6 +150,9 @@ class NocoDBClient:
             payload["fk_workspace_id"] = workspace_id
         return self._request("POST", path, json=payload)
 
+    def update_base(self, base_id: str, payload: dict[str, Any]) -> Any:
+        return self._request("PATCH", f"/api/v2/meta/bases/{base_id}", json=payload)
+
     def duplicate_base(
         self,
         base_id: str,

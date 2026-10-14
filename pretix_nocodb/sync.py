@@ -254,7 +254,7 @@ class NocoDBSyncService:
             return persisted
 
         client = self._get_client()
-        title = self._i18n_to_str(self.event.name).strip() or self.event.slug
+        title = self._base_title()
 
         if self.config.should_duplicate_source_base:
             base_id = self._duplicate_source_base(client)
@@ -268,6 +268,9 @@ class NocoDBSyncService:
         self._persist_setting("base_id", base_id)
         self.config.base_id = base_id
         return base_id
+
+    def _base_title(self) -> str:
+        return self._i18n_to_str(self.event.name).strip() or self.event.slug
 
     def _duplicate_source_base(self, client: NocoDBClient) -> str:
         # Structure-only copy (excludeData) of the base the source event uses,
@@ -295,7 +298,13 @@ class NocoDBSyncService:
     def _await_duplicated_base(self, base_id: str) -> None:
         if not self.config.base_duplication_pending:
             return
-        self._wait_for_participants_table(self._get_client(), base_id)
+        client = self._get_client()
+        # NocoDB titles a duplicate "<source title> copy". The copy belongs to
+        # this event now, so give it this event's name. Renaming before the wait
+        # keeps the stale title from being what people see while the copy job
+        # runs; the pending flag below is what gets this retried if it fails.
+        client.update_base(base_id, {"title": self._base_title()})
+        self._wait_for_participants_table(client, base_id)
         self._persist_setting("base_duplication_pending", False)
         self.config.base_duplication_pending = False
 

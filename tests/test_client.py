@@ -168,3 +168,14 @@ def test_duplicate_base_posts_options_and_returns_ids():
             "excludeHooks": True,
         }
     }
+
+
+def test_update_base_patches_the_base_meta():
+    session = StubSession(response=_response(200, content=b'{"id": "pbase", "title": "Retreat"}'))
+
+    _client(session).update_base("pbase", {"title": "Retreat"})
+
+    call = session.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["url"] == "https://app.nocodb.test/api/v2/meta/bases/pbase"
+    assert call["json"] == {"title": "Retreat"}

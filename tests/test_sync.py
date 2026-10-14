@@ -53,6 +53,11 @@ class FakeNocoDBClient:
         self.bases.append(base)
         return base
 
+    def update_base(self, base_id: str, payload: dict):
+        base = next(base for base in self.bases if base["id"] == base_id)
+        base.update(payload)
+        return base
+
     def duplicate_base(
         self,
         base_id: str,
@@ -1312,6 +1317,11 @@ def test_sync_duplicates_source_base_instead_of_creating(event, order):
     assert new_base_id
     assert new_base_id != template_base_id
 
+    # NocoDB would have called it "<template title> copy"; the base belongs to
+    # the copied event, so it carries that event's name.
+    new_base = next(base for base in client.bases if base["id"] == new_base_id)
+    assert new_base["title"] == str(copy.name)
+
     new_tables = [t for t in client.tables.values() if t["base_id"] == new_base_id]
     # The participants table is adopted from the duplicate, not created anew.
     assert len(new_tables) == 1
@@ -1406,3 +1416,43 @@ def test_sync_hides_non_essential_participant_columns(event, order):
         assert vc["show"] == expected_show, (
             f"column {col_name!r}: show={vc['show']}, expected {expected_show}"
         )
+
+
+def test_a_failed_rename_keeps_the_duplication_pending(event):
+    client = FakeNocoDBClient()
+    base = client.create_base("Template copy")
+    event.settings.set("plugin_nocodb_base_id", base["id"])
+    event.settings.set("plugin_nocodb_base_duplication_pending", True)
+
+    def boom(_base_id, _payload):
+        raise NocoDBAPIError("HTTP 503", status_code=503)
+
+    client.update_base = boom
+    service = NocoDBSyncService(event, client=client)
+
+    with pytest.raises(NocoDBAPIError):
+        service.sync_schema()
+
+    # Still pending, so the next sync retries the rename rather than leaving
+    # NocoDB's "<source> copy" on a base that now belongs to this event.
+    assert (
+        event.settings.get("plugin_nocodb_base_duplication_pending", as_type=bool) is True
+    )
+
+
+def test_a_freshly_created_base_is_not_renamed(event):
+    # Nothing to correct: create_base already titled it after the event. The
+    # rename belongs to the duplication path alone.
+    client = FakeNocoDBClient()
+    renames: list[dict] = []
+
+    def record(base_id, payload):
+        renames.append(payload)
+        return FakeNocoDBClient.update_base(client, base_id, payload)
+
+    client.update_base = record
+
+    NocoDBSyncService(event, client=client).sync_schema()
+
+    assert renames == []
+    assert client.bases[0]["title"] == str(event.name)
